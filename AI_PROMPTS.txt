@@ -1,0 +1,83 @@
+================================================
+Date: 2026-11-03
+Student: Abdelmohymen
+Tool: ChatGPT / Gemini
+Related Requirement: ACC-06, ACC-19
+Prompt:
+How should we configure httpOnly access and refresh token cookies in NestJS with a 30-minute sliding inactivity expiry?
+
+How the output was used:
+Used the pattern to configure res.cookie() options (httpOnly, secure, sameSite) in AuthController and track lastActivityAt in JwtAuthGuard.
+================================================
+
+================================================
+Date: 2026-11-04
+Student: Takiee
+Tool: ChatGPT
+Related Requirement: ACC-15, GEN-07, GEN-10
+Prompt:
+What is the cleanest way in NestJS Mongoose to separate provider deactivation (airline/hotel) from moderator account suspension and log admin actions?
+
+How the output was used:
+Designed AuditLogSchema and implemented separate status fields on User (active/suspended/deactivated) vs Airline/Hotel (isActive), recording each admin action in AuditLogsService.
+================================================
+
+================================================
+Date: 2026-11-05
+Student: Abdo
+Tool: ChatGPT
+Related Requirement: FLT-03, FLT-09, GEN-06
+Prompt:
+How can we convert local departure and arrival date-times to UTC using an airport's IANA time zone in Node.js without external heavy dependencies?
+
+How the output was used:
+Implemented a timezone helper using Intl.DateTimeFormat to parse local airport timestamps into UTC Date objects and format UTC dates back into the airport's local time zone.
+================================================
+
+================================================
+Date: 2026-11-06
+Student: Abdella
+Tool: ChatGPT
+Related Requirement: FLT-22
+Prompt:
+How can concurrent flight bookings be handled in MongoDB so two users cannot reserve the last remaining seats at the same time?
+
+How the output was used:
+Used an atomic findOneAndUpdate filter checking that (bookedSeats + heldSeats + requestedSeats <= seatCount) before incrementing heldSeats and creating a 10-minute Pending Payment booking hold.
+================================================
+
+================================================
+Date: 2026-11-07
+Student: Adham
+Tool: ChatGPT
+Related Requirement: HTL-11, HTL-18
+Prompt:
+How do we check overlapping date ranges for hotel room reservations and 10-minute holds in MongoDB?
+
+How the output was used:
+Implemented date range overlap queries (existing.checkInDate < requestedCheckOut && existing.checkOutDate > requestedCheckIn) across Confirmed and unexpired Pending Payment reservations as well as room blockedRanges.
+================================================
+
+================================================
+Date: 2026-11-08
+Student: Youssef
+Tool: ChatGPT
+Related Requirement: PAY-01, PAY-03
+Prompt:
+How do we handle raw body verification for Stripe webhooks in NestJS and issue partial refunds based on cancellation tiers?
+
+How the output was used:
+Enabled rawBody in NestFactory.create() and implemented PaymentIntents creation and stripe.refunds.create() with fallback test-mode simulation when running local Swagger evaluations.
+================================================
+
+================================================
+Date: 2026-11-09
+Student: Hamza
+Tool: ChatGPT
+Related Requirement: ITN-08, ITN-09, ITN-18
+Prompt:
+How should we structure consecutive city grouping for itinerary days and cache FXRatesAPI exchange rates once per day in MongoDB?
+
+How the output was used:
+Wrote a helper that groups consecutive days sharing the same city_id with subtotal calculation, and created ExchangeRateSchema to cache daily rates fetched from FXRatesAPI with fallback to the last cached entry on network failure.
+================================================
