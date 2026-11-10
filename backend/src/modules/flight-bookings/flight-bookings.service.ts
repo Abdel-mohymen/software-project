@@ -309,7 +309,7 @@ export class FlightBookingsService {
         bookingReference: booking.bookingReference,
         tripType: booking.tripType,
         cabinCategory: booking.cabinCategory,
-        seatsReserved,
+        seatsReserved: seatsRequired,
         baseFareTotal,
         extraBaggageTotal,
         totalAmount,
