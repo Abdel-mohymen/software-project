@@ -1,83 +1,251 @@
 ================================================
 Date: 2026-11-03
-Student: Abdelmohymen
-Tool: ChatGPT / Gemini
+Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Tool: Gemini / ChatGPT
 Related Requirement: ACC-06, ACC-19
 Prompt:
-How should we configure httpOnly access and refresh token cookies in NestJS with a 30-minute sliding inactivity expiry?
+How should we configure httpOnly access and refresh token cookies in NestJS with a sliding 30-minute inactivity timeout and a /api/auth/refresh endpoint?
 
 How the output was used:
-Used the pattern to configure res.cookie() options (httpOnly, secure, sameSite) in AuthController and track lastActivityAt in JwtAuthGuard.
+Implemented JwtAuthGuard to verify user.lastActivityAt within 30 minutes, reissue a fresh 30-minute access_token httpOnly cookie on each active request, and added POST /api/auth/refresh verifying the refreshTokenHash.
+================================================
+
+================================================
+Date: 2026-11-03
+Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Tool: Gemini
+Related Requirement: GEN-08
+Prompt:
+How can we prevent a user from uploading an executable (.exe) file renamed to .png or .jpg in NestJS Multer?
+
+How the output was used:
+Added binary magic-bytes inspection in UploadsService.hasValidImageMagicBytes() checking the PNG signature (89 50 4E 47 0D 0A 1A 0A) and JPEG signature (FF D8 FF) alongside the 5 MB limit.
 ================================================
 
 ================================================
 Date: 2026-11-04
-Student: Takiee
-Tool: ChatGPT
-Related Requirement: ACC-15, GEN-07, GEN-10
+Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Tool: Gemini
+Related Requirement: GEN-12, FLT-02
 Prompt:
-What is the cleanest way in NestJS Mongoose to separate provider deactivation (airline/hotel) from moderator account suspension and log admin actions?
+How do we write an RFC-4180 compliant CSV parser in TypeScript and escape special regex characters in search queries?
 
 How the output was used:
-Designed AuditLogSchema and implemented separate status fields on User (active/suspended/deactivated) vs Airline/Hotel (isActive), recording each admin action in AuditLogsService.
+Created parseRfc4180Csv() in src/common/utils/csv.util.ts to seed Countries.csv, Cities.csv, Airports.csv, and Attractions.csv, and buildSafeRegex() in regex.util.ts to prevent RegExp injection on inputs like "(".
+================================================
+
+================================================
+Date: 2026-11-04
+Student: Takiee (GitHub: Takiee-Allah)
+Tool: ChatGPT
+Related Requirement: ACC-13, ACC-07a
+Prompt:
+How should moderator creation and admin password resets enforce a mandatory password change on next login in NestJS?
+
+How the output was used:
+Set mustChangePassword = true on UserSchema during POST /api/admin/moderators and POST /api/admin/users/:id/reset-password, and blocked non-auth endpoints in JwtAuthGuard until PATCH /api/auth/change-password succeeds.
 ================================================
 
 ================================================
 Date: 2026-11-05
-Student: Abdo
+Student: Takiee (GitHub: Takiee-Allah)
 Tool: ChatGPT
-Related Requirement: FLT-03, FLT-09, GEN-06
+Related Requirement: ACC-15, ACC-16, GEN-01
 Prompt:
-How can we convert local departure and arrival date-times to UTC using an airport's IANA time zone in Node.js without external heavy dependencies?
+What is the cleanest way in NestJS Mongoose to separate provider deactivation (airline/hotel) from moderator account suspension?
 
 How the output was used:
-Implemented a timezone helper using Intl.DateTimeFormat to parse local airport timestamps into UTC Date objects and format UTC dates back into the airport's local time zone.
+Implemented separate status fields on User (active/suspended/deactivated) vs Airline/Hotel (isActive), hiding deactivated providers from search while preserving existing Confirmed bookings and notifying moderators.
+================================================
+
+================================================
+Date: 2026-11-05
+Student: Takiee (GitHub: Takiee-Allah)
+Tool: ChatGPT
+Related Requirement: GEN-07, GEN-09, GEN-10
+Prompt:
+How do we enforce a single report per user per content item in Mongoose and log admin moderation decisions?
+
+How the output was used:
+Added a unique compound index { reporterId: 1, targetType: 1, targetId: 1 } on ReportSchema and recorded all admin actions (dismiss, hide, delete, suspend, deactivate) in AuditLogSchema.
+================================================
+
+================================================
+Date: 2026-11-05
+Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Tool: ChatGPT
+Related Requirement: FLT-03, GEN-06
+Prompt:
+How can we convert local departure and arrival date-times to UTC using an airport's IANA time zone in Node.js?
+
+How the output was used:
+Implemented parseLocalAirportTimeToUtc() and formatUtcToLocalAirportTime() in timezone.util.ts using Intl.DateTimeFormat to convert local airport times to UTC and verify arrivalTimeUtc > departureTimeUtc.
 ================================================
 
 ================================================
 Date: 2026-11-06
-Student: Abdella
+Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Tool: ChatGPT
+Related Requirement: FLT-04, FLT-05, FLT-06
+Prompt:
+How do we prevent reducing cabin seat counts below already reserved seats and handle 100% refunds when an airline moderator cancels a Scheduled flight?
+
+How the output was used:
+Validated dto.seatCount >= (cabin.bookedSeats + cabin.heldSeats) in FlightsService.updateCabin(), and updated cancelFlightByModerator() to cancel Confirmed bookings with 100% refund records and passenger notifications.
+================================================
+
+================================================
+Date: 2026-11-06
+Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Tool: ChatGPT
+Related Requirement: FLT-09, FLT-11, FLT-12, FLT-15
+Prompt:
+How should airline cancellation tier matching and round-trip flight search filtering by passenger types and cabin inventory work?
+
+How the output was used:
+Sorted cancellationTiers descending by daysBeforeDeparture to pick the highest threshold <= daysRemaining, and filtered Scheduled flights of active airlines where remaining seats >= (adults + children).
+================================================
+
+================================================
+Date: 2026-11-06
+Student: Abdella (GitHub: Abdallah)
 Tool: ChatGPT
 Related Requirement: FLT-22
 Prompt:
-How can concurrent flight bookings be handled in MongoDB so two users cannot reserve the last remaining seats at the same time?
+How can concurrent flight seat holds be handled in MongoDB so 10 simultaneous requests for the last seat cannot overbook, and why can $expr inside $elemMatch be problematic?
 
 How the output was used:
-Used an atomic findOneAndUpdate filter checking that (bookedSeats + heldSeats + requestedSeats <= seatCount) before incrementing heldSeats and creating a 10-minute Pending Payment booking hold.
+Replaced $expr inside $elemMatch with an optimistic concurrency loop in atomicallyHoldSeatsOnFlight() that matches the exact cabin subdocument state (category, seatCount, bookedSeats, heldSeats) in findOneAndUpdate before incrementing heldSeats.
 ================================================
 
 ================================================
 Date: 2026-11-07
-Student: Adham
+Student: Abdella (GitHub: Abdallah)
 Tool: ChatGPT
-Related Requirement: HTL-11, HTL-18
+Related Requirement: FLT-22, GEN-11
 Prompt:
-How do we check overlapping date ranges for hotel room reservations and 10-minute holds in MongoDB?
+How do we prevent a background cron job and a concurrent HTTP request from releasing the same expired 10-minute flight seat hold twice?
 
 How the output was used:
-Implemented date range overlap queries (existing.checkInDate < requestedCheckOut && existing.checkOutDate > requestedCheckIn) across Confirmed and unexpired Pending Payment reservations as well as room blockedRanges.
+Used an atomic while-loop with findOneAndUpdate({ status: 'Pending Payment', holdExpiresAt: { $lte: now } }, { $set: { status: 'Expired' } }) so each expired booking transitions exactly once, and clamped heldSeats with Math.max(0, ...).
+================================================
+
+================================================
+Date: 2026-11-07
+Student: Abdella (GitHub: Abdallah)
+Tool: ChatGPT
+Related Requirement: FLT-23, FLT-29
+Prompt:
+How can we generate a downloadable PDF e-ticket using pdfkit and export flight passengers as CSV in NestJS?
+
+How the output was used:
+Implemented generateETicketPdf() streaming a PDF buffer with PNR, flight segments, and passenger manifest, and exportPassengersCsv() returning RFC-4180 escaped CSV rows for airline moderators.
+================================================
+
+================================================
+Date: 2026-11-07
+Student: Adham (GitHub: Adham)
+Tool: ChatGPT
+Related Requirement: HTL-03, HTL-04, HTL-05, HTL-06
+Prompt:
+How do we enforce non-overlapping bookable date ranges and reject room blocking or deletion when reservations exist?
+
+How the output was used:
+Implemented validateAndParseDateRanges() in HotelsService to sort and check range overlaps, blocked room deletion if any reservation ever referenced the roomId, and rejected blockedRanges overlapping Confirmed or Pending Payment reservations.
 ================================================
 
 ================================================
 Date: 2026-11-08
-Student: Youssef
+Student: Adham (GitHub: Adham)
 Tool: ChatGPT
-Related Requirement: PAY-01, PAY-03
+Related Requirement: HTL-16, HTL-18
 Prompt:
-How do we handle raw body verification for Stripe webhooks in NestJS and issue partial refunds based on cancellation tiers?
+How do we prevent a race condition (double-booking) when two users concurrently request the same hotel room for overlapping dates?
 
 How the output was used:
-Enabled rawBody in NestFactory.create() and implemented PaymentIntents creation and stripe.refunds.create() with fallback test-mode simulation when running local Swagger evaluations.
+Added activeLocks on RoomSchema and implemented atomicallyLockRoomForDates() using findOneAndUpdate with $not: { $elemMatch: { checkInDate: { $lt: checkOut }, checkOutDate: { $gt: checkIn } } }, rolling back acquired locks if any room in a multi-room request conflicts.
+================================================
+
+================================================
+Date: 2026-11-08
+Student: Adham (GitHub: Adham)
+Tool: ChatGPT
+Related Requirement: HTL-23, HTL-24, HTL-26
+Prompt:
+How do we restrict hotel reviews to one review per Completed stay after check-out and recalculate the hotel's average rating?
+
+How the output was used:
+Added a unique index on hotelBookingId in ReviewSchema, verified reservation.status === 'Completed', and recalculated averageRating and ratingsCount on create, update, and delete.
+================================================
+
+================================================
+Date: 2026-11-08
+Student: Youssef (GitHub: omarashraf4488 / Youssef)
+Tool: ChatGPT
+Related Requirement: PAY-01, PAY-02
+Prompt:
+How do we enforce provider policy acceptance with a timestamp before creating a Stripe PaymentIntent and verify stripe-signature on POST /api/payments/webhook?
+
+How the output was used:
+Blocked createPaymentIntent() unless booking.policyAccepted && booking.policyAcceptedAt are set, and implemented verifyWebhookSignatureOrThrow() in PaymentsService to reject unsigned or tampered webhook calls with 400 Bad Request.
 ================================================
 
 ================================================
 Date: 2026-11-09
-Student: Hamza
+Student: Youssef (GitHub: omarashraf4488 / Youssef)
 Tool: ChatGPT
-Related Requirement: ITN-08, ITN-09, ITN-18
+Related Requirement: PAY-01, FLT-23, HTL-17
 Prompt:
-How should we structure consecutive city grouping for itinerary days and cache FXRatesAPI exchange rates once per day in MongoDB?
+What state transitions must happen when payment_intent.succeeded is verified by the webhook?
 
 How the output was used:
-Wrote a helper that groups consecutive days sharing the same city_id with subtotal calculation, and created ExchangeRateSchema to cache daily rates fetched from FXRatesAPI with fallback to the last cached entry on network failure.
+Updated Payment status to 'succeeded', Booking status to 'Confirmed', converted Flight cabin heldSeats to bookedSeats (or Room activeLocks from 'hold' to 'confirmed'), and dispatched an in-app confirmation notification.
+================================================
+
+================================================
+Date: 2026-11-09
+Student: Youssef (GitHub: omarashraf4488 / Youssef)
+Tool: ChatGPT
+Related Requirement: PAY-03
+Prompt:
+How should user-initiated and moderator-initiated cancellations create Stripe refunds and store Refund documents?
+
+How the output was used:
+Integrated stripe.refunds.create() with the booking's succeeded PaymentIntent and persisted the refund status (Pending, Refunded, Failed) and percentage via Mongoose RefundModel.
+================================================
+
+================================================
+Date: 2026-11-09
+Student: Hamza (GitHub: hamzaferas4)
+Tool: ChatGPT
+Related Requirement: ITN-05, ITN-07, ITN-08, ITN-09
+Prompt:
+How should we recalculate day numbers, derived dates, and consecutive city groups when itinerary days are added, deleted, or reordered?
+
+How the output was used:
+Implemented recalculateDayNumbersAndDates() deriving each day's date from startDate + (dayNumber - 1), and buildCityGroups() grouping consecutive days sharing the same city_id with day counts and budget subtotals.
+================================================
+
+================================================
+Date: 2026-11-10
+Student: Hamza (GitHub: hamzaferas4)
+Tool: ChatGPT
+Related Requirement: ITN-14, ITN-16, ITN-18
+Prompt:
+How should we integrate FXRatesAPI in NestJS using FXRATES_API_KEY, cache daily exchange rates in MongoDB, and handle API failures or invalid currencies?
+
+How the output was used:
+Implemented getOrFetchExchangeRates() passing FXRATES_API_KEY, caching daily USD rates in ExchangeRateSchema, falling back to the last cached DB entry on network failure, and throwing 503 ServiceUnavailableException / 400 BadRequestException when rates or currency codes are unavailable.
+================================================
+
+================================================
+Date: 2026-11-10
+Student: Hamza (GitHub: hamzaferas4)
+Tool: ChatGPT
+Related Requirement: ITN-21, BLG-06, BLG-09
+Prompt:
+How do we clone a public itinerary with attribution and sort blog search results by interaction score?
+
+How the output was used:
+Deep-copied days, activities, budgets, and transport costs into a private itinerary storing clonedFromItineraryId and originalAuthorId, enforced a unique { postId, userId } index on LikeSchema, and sorted blog search results by (likesCount + commentsCount) descending.
 ================================================

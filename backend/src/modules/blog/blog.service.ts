@@ -21,6 +21,7 @@ import {
 } from './dto/blog.dto';
 import { AccountStatus, UserRole } from '../../common/enums/role.enum';
 import { paginateResult } from '../../common/dto/pagination.dto';
+import { buildSafeRegex } from '../../common/utils/regex.util';
 
 @Injectable()
 export class BlogService {
@@ -72,9 +73,8 @@ export class BlogService {
       baseFilter.tags = query.tag.trim().toLowerCase();
     }
 
-    if (query.search) {
-      // BLG-09: search published posts by keyword in title, tags or author name; ordered by interaction score (likes + comments) desc, newest first tie-breaker
-      const regex = new RegExp(query.search.trim(), 'i');
+    if (query.search && query.search.trim()) {
+      const regex = buildSafeRegex(query.search);
       const matchingAuthors = await this.userModel.find({ name: regex }).select('_id').lean();
       const authorIds = matchingAuthors.map((u) => u._id);
 
@@ -148,14 +148,18 @@ export class BlogService {
     const isAuthor = user && user.id === authorIdStr;
     const isAdmin = user && user.role === UserRole.ADMIN;
 
-    if ((post.status === 'Draft' || post.isHidden || post.isHiddenByDeactivation) && !isAuthor && !isAdmin) {
+    if (
+      (post.status === 'Draft' || post.isHidden || post.isHiddenByDeactivation) &&
+      !isAuthor &&
+      !isAdmin
+    ) {
       throw new NotFoundException('Blog post is not publicly available.');
     }
 
     const comments = await this.commentModel
       .find({ postId: post._id, isHidden: { $ne: true } })
       .populate('authorId', 'name status')
-      .sort({ createdAt: 1 }) // BLG-05: chronological order
+      .sort({ createdAt: 1 })
       .lean();
 
     const formattedComments = comments.map((c: any) => {
