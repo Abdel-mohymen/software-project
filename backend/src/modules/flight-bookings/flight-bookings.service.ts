@@ -14,6 +14,9 @@ import { Flight, FlightDocument } from '../flights/schemas/flight.schema';
 import { Airline, AirlineDocument } from '../airlines/schemas/airline.schema';
 import { AirlinesService } from '../airlines/airlines.service';
 import { NotificationsService } from '../notifications/notifications.service';
+import { Refund, RefundDocument } from '../payments/schemas/refund.schema';
+import { Payment, PaymentDocument } from '../payments/schemas/payment.schema';
+import Stripe from 'stripe';
 import {
   ChangeFlightDto,
   CreateFlightBookingDto,
@@ -26,43 +29,59 @@ const HOLD_DURATION_MS = 10 * 60 * 1000; // 10 minutes (FLT-22)
 
 @Injectable()
 export class FlightBookingsService {
+  private stripe: Stripe | null = null;
+
   constructor(
     @InjectModel(FlightBooking.name)
     private readonly flightBookingModel: Model<FlightBookingDocument>,
     @InjectModel(Flight.name) private readonly flightModel: Model<FlightDocument>,
     @InjectModel(Airline.name) private readonly airlineModel: Model<AirlineDocument>,
+    @InjectModel(Refund.name) private readonly refundModel: Model<RefundDocument>,
+    @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly airlinesService: AirlinesService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+  ) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (key && key.startsWith('sk_test_') && !key.includes('replace_with')) {
+      this.stripe = new Stripe(key, { apiVersion: '2023-10-16' as any });
+    }
+  }
 
   @Cron(CronExpression.EVERY_MINUTE)
   async releaseExpiredHoldsAndCompletePastFlights() {
     const now = new Date();
-    const expiredBookings = await this.flightBookingModel.find({
-      status: BookingLifecycleStatus.PENDING_PAYMENT,
-      holdExpiresAt: { $lte: now },
-    });
 
-    for (const booking of expiredBookings) {
-      booking.status = BookingLifecycleStatus.EXPIRED;
-      await booking.save();
+    // Atomically transition one expired hold at a time so concurrent callers NEVER release the same hold twice (FLT-22)
+    while (true) {
+      const expiredBooking = await this.flightBookingModel.findOneAndUpdate(
+        {
+          status: BookingLifecycleStatus.PENDING_PAYMENT,
+          holdExpiresAt: { $lte: now },
+        },
+        {
+          $set: { status: BookingLifecycleStatus.EXPIRED },
+        },
+        { new: true },
+      );
+
+      if (!expiredBooking) break;
 
       await this.releaseHeldSeatsOnFlight(
-        booking.outboundFlightId,
-        booking.cabinCategory,
-        booking.seatsReserved,
+        expiredBooking.outboundFlightId,
+        expiredBooking.cabinCategory,
+        expiredBooking.seatsReserved,
       );
-      if (booking.returnFlightId) {
+      if (expiredBooking.returnFlightId) {
         await this.releaseHeldSeatsOnFlight(
-          booking.returnFlightId,
-          booking.cabinCategory,
-          booking.seatsReserved,
+          expiredBooking.returnFlightId,
+          expiredBooking.cabinCategory,
+          expiredBooking.seatsReserved,
         );
       }
     }
 
-    // Transition Confirmed bookings whose departure/arrival has passed to Completed (GEN-11)
+    // Transition Confirmed bookings whose departure has passed to Completed (GEN-11)
     await this.flightBookingModel.updateMany(
       {
         status: BookingLifecycleStatus.CONFIRMED,
@@ -142,49 +161,60 @@ export class FlightBookingsService {
     cabinCategory: string,
     seatsRequired: number,
   ) {
-    const candidates = await this.flightModel.findOne({
-      _id: flightId,
-      status: 'Scheduled',
-      departureTimeUtc: { $gt: new Date() },
-    });
-
-    if (!candidates) {
-      throw new BadRequestException('Selected flight is not Scheduled or has already departed.');
-    }
-
-    const cabin = candidates.cabins.find((c) => c.category === cabinCategory);
-    if (!cabin) {
-      throw new BadRequestException(`Cabin category '${cabinCategory}' not found on flight.`);
-    }
-
-    // Atomic concurrency-safe update: ensure bookedSeats + heldSeats + seatsRequired <= seatCount (FLT-22)
-    const maxAllowedCurrentReserved = cabin.seatCount - seatsRequired;
-    const updated = await this.flightModel.findOneAndUpdate(
-      {
+    // Optimistic concurrency loop with exact subdocument state match on cabin element (FLT-22)
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const candidate = await this.flightModel.findOne({
         _id: flightId,
         status: 'Scheduled',
-        cabins: {
-          $elemMatch: {
-            category: cabinCategory,
-            $expr: {
-              $lte: [{ $add: ['$bookedSeats', '$heldSeats'] }, maxAllowedCurrentReserved],
+        departureTimeUtc: { $gt: new Date() },
+      });
+
+      if (!candidate) {
+        throw new BadRequestException('Selected flight is not Scheduled or has already departed.');
+      }
+
+      const cabin = candidate.cabins.find((c) => c.category === cabinCategory);
+      if (!cabin) {
+        throw new BadRequestException(`Cabin category '${cabinCategory}' not found on flight.`);
+      }
+
+      const currentBooked = cabin.bookedSeats || 0;
+      const currentHeld = cabin.heldSeats || 0;
+
+      if (currentBooked + currentHeld + seatsRequired > cabin.seatCount) {
+        throw new ConflictException(
+          `Not enough seats remaining in ${cabinCategory} on flight ${candidate.flightNumber} (FLT-22).`,
+        );
+      }
+
+      // Match the exact subdocument values (bookedSeats & heldSeats) inside $elemMatch so only ONE concurrent request succeeds per state transition
+      const updated = await this.flightModel.findOneAndUpdate(
+        {
+          _id: flightId,
+          status: 'Scheduled',
+          cabins: {
+            $elemMatch: {
+              category: cabinCategory,
+              seatCount: cabin.seatCount,
+              bookedSeats: currentBooked,
+              heldSeats: currentHeld,
             },
           },
         },
-      },
-      {
-        $inc: { 'cabins.$.heldSeats': seatsRequired },
-      },
-      { new: true },
-    );
-
-    if (!updated) {
-      throw new ConflictException(
-        `Not enough seats remaining in ${cabinCategory} on flight ${candidates.flightNumber} (FLT-22).`,
+        {
+          $inc: { 'cabins.$.heldSeats': seatsRequired },
+        },
+        { new: true },
       );
+
+      if (updated) {
+        return { flight: updated, cabin };
+      }
     }
 
-    return { flight: updated, cabin };
+    throw new ConflictException(
+      `High concurrency conflict while reserving ${cabinCategory} seats. Please retry (FLT-22).`,
+    );
   }
 
   private async releaseHeldSeatsOnFlight(
@@ -192,10 +222,12 @@ export class FlightBookingsService {
     cabinCategory: string,
     seatsCount: number,
   ) {
-    await this.flightModel.updateOne(
-      { _id: flightId, 'cabins.category': cabinCategory },
-      { $inc: { 'cabins.$.heldSeats': -seatsCount } },
-    );
+    const flight = await this.flightModel.findById(flightId);
+    if (!flight) return;
+    const cabin = flight.cabins.find((c) => c.category === cabinCategory);
+    if (!cabin) return;
+    cabin.heldSeats = Math.max(0, (cabin.heldSeats || 0) - seatsCount);
+    await flight.save();
   }
 
   async createHoldBooking(userId: string, dto: CreateFlightBookingDto) {
@@ -222,7 +254,6 @@ export class FlightBookingsService {
       airline.baggagePolicy.maxExtraBagsPerPassenger,
     );
 
-    // Atomically hold outbound seats (FLT-22)
     const { cabin: outboundCabin } = await this.atomicallyHoldSeatsOnFlight(
       outboundId,
       dto.cabinCategory,
@@ -259,7 +290,6 @@ export class FlightBookingsService {
 
     const legCount = returnId ? 2 : 1;
     const perSeatFare = outboundCabin.price + returnCabinPrice;
-    // FLT-12: adults and children pay 100% of cabin fare; infants pay 10% and occupy no seat
     const baseFareTotal =
       Math.round(((adults + children) * perSeatFare + infants * 0.1 * perSeatFare) * 100) / 100;
 
@@ -376,9 +406,9 @@ export class FlightBookingsService {
       throw new ForbiddenException('You do not have permission to view this booking (ACC-11).');
     }
 
-    const refundRecord = await this.connection
-      .collection('refunds')
-      .findOne({ bookingType: 'flight', bookingId: booking._id });
+    const refundRecord = await this.refundModel
+      .findOne({ bookingType: 'flight', bookingId: booking._id })
+      .lean();
 
     return {
       ...booking,
@@ -386,9 +416,9 @@ export class FlightBookingsService {
     };
   }
 
-  async cancelFlightBookingByUser(userId: string, bookingId: string, confirmed = true) {
+  async cancelFlightBookingByUser(userId: string, bookingId: string, confirmed = false) {
     if (!confirmed) {
-      throw new BadRequestException('Confirmation is required to cancel a booking (FLT-26, GEN-03).');
+      throw new BadRequestException('Confirmation is required to cancel a booking (pass confirm=true) (FLT-26, GEN-03).');
     }
 
     await this.releaseExpiredHoldsAndCompletePastFlights();
@@ -422,7 +452,6 @@ export class FlightBookingsService {
     booking.refundAmount = refundAmount;
     await booking.save();
 
-    // Return seats to inventory (FLT-26)
     await this.flightModel.updateOne(
       { _id: booking.outboundFlightId, 'cabins.category': booking.cabinCategory },
       { $inc: { 'cabins.$.bookedSeats': -booking.seatsReserved } },
@@ -436,20 +465,39 @@ export class FlightBookingsService {
 
     let refundRecord: any = null;
     if (refundAmount > 0) {
-      const res = await this.connection.collection('refunds').insertOne({
+      let stripeRefundId = `re_test_${Date.now()}`;
+      let refundStatus: 'Pending' | 'Refunded' | 'Failed' = 'Refunded';
+
+      const payment = await this.paymentModel.findOne({
+        bookingType: 'flight',
+        bookingId: booking._id,
+        status: 'succeeded',
+      });
+
+      if (this.stripe && payment && payment.stripePaymentIntentId && !payment.stripePaymentIntentId.startsWith('pi_test_')) {
+        try {
+          const stripeRefund = await this.stripe.refunds.create({
+            payment_intent: payment.stripePaymentIntentId,
+            amount: Math.round(refundAmount * 100),
+          });
+          stripeRefundId = stripeRefund.id;
+          refundStatus = stripeRefund.status === 'succeeded' ? 'Refunded' : 'Pending';
+        } catch {
+          refundStatus = 'Failed';
+        }
+      }
+
+      refundRecord = await this.refundModel.create({
         bookingType: 'flight',
         bookingId: booking._id,
         userId: booking.userId,
         amount: refundAmount,
         currency: booking.currency,
         refundPercentage,
+        stripeRefundId,
+        status: refundStatus,
         reason: 'User-initiated flight booking cancellation',
-        status: 'Refunded',
-        stripeRefundId: `re_user_${Date.now()}`,
-        createdAt: new Date(),
-        updatedAt: new Date(),
       });
-      refundRecord = { id: res.insertedId, amount: refundAmount, status: 'Refunded' };
     }
 
     await this.notificationsService.createNotification({
