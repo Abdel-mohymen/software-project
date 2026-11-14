@@ -61,8 +61,6 @@ export class AuthService {
         role: user.role,
         preferredCurrency: user.preferredCurrency,
       },
-      // Included in dev response to allow testing optional ACC-02 via Swagger
-      verificationToken,
     };
   }
 
@@ -130,12 +128,12 @@ export class AuthService {
     };
 
     const accessToken = await this.jwtService.signAsync(payload, {
-      secret: process.env.JWT_ACCESS_SECRET || 'giu_dev_access_secret',
+      secret: process.env.JWT_ACCESS_SECRET || 'giu_dev_access_secret_fallback',
       expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '30m',
     });
 
     const refreshToken = await this.jwtService.signAsync(payload, {
-      secret: process.env.JWT_REFRESH_SECRET || 'giu_dev_refresh_secret',
+      secret: process.env.JWT_REFRESH_SECRET || 'giu_dev_refresh_secret_fallback',
       expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
     });
 
@@ -157,6 +155,43 @@ export class AuthService {
         assignedProviderId: user.assignedProviderId,
       },
     };
+  }
+
+  async refreshAccessToken(refreshToken: string) {
+    if (!refreshToken) {
+      throw new UnauthorizedException('Refresh token cookie is missing.');
+    }
+
+    try {
+      const payload = await this.jwtService.verifyAsync(refreshToken, {
+        secret: process.env.JWT_REFRESH_SECRET || 'giu_dev_refresh_secret_fallback',
+      });
+
+      const user = await this.userModel.findById(payload.sub);
+      if (!user || !user.refreshTokenHash || user.status !== AccountStatus.ACTIVE) {
+        throw new UnauthorizedException('Invalid or revoked refresh session.');
+      }
+
+      const validHash = await bcrypt.compare(refreshToken, user.refreshTokenHash);
+      if (!validHash) {
+        throw new UnauthorizedException('Refresh token does not match active session.');
+      }
+
+      user.lastActivityAt = new Date();
+      await user.save();
+
+      const accessToken = await this.jwtService.signAsync(
+        { sub: user._id.toString(), email: user.email, role: user.role },
+        {
+          secret: process.env.JWT_ACCESS_SECRET || 'giu_dev_access_secret_fallback',
+          expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '30m',
+        },
+      );
+
+      return { accessToken };
+    } catch {
+      throw new UnauthorizedException('Invalid or expired refresh token.');
+    }
   }
 
   async logout(userId: string) {
@@ -193,22 +228,17 @@ export class AuthService {
   async forgotPassword(dto: ForgotPasswordDto) {
     const email = dto.email.trim().toLowerCase();
     const user = await this.userModel.findOne({ email });
-    let debugResetToken: string | undefined;
 
     if (user && user.status === AccountStatus.ACTIVE) {
       const rawToken = crypto.randomBytes(24).toString('hex');
       user.passwordResetTokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       user.passwordResetExpiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes (ACC-07)
       await user.save();
-      if (process.env.NODE_ENV !== 'production') {
-        debugResetToken = rawToken;
-      }
     }
 
     // Do not reveal whether the email exists (ACC-07)
     return {
       message: 'If an account with that email exists, a password reset link has been sent.',
-      ...(debugResetToken ? { debugResetToken } : {}),
     };
   }
 
