@@ -15,6 +15,24 @@ export class DateRangeWindow {
   reason?: string;
 }
 
+@Schema({ _id: false })
+export class ActiveRoomLock {
+  @Prop({ required: true })
+  bookingReference: string;
+
+  @Prop({ required: true })
+  checkInDate: Date;
+
+  @Prop({ required: true })
+  checkOutDate: Date;
+
+  @Prop({ required: true, enum: ['hold', 'confirmed'] })
+  lockType: 'hold' | 'confirmed';
+
+  @Prop({ type: Date, default: null })
+  expiresAt: Date | null;
+}
+
 @Schema({ timestamps: true })
 export class Room {
   @Prop({ type: Types.ObjectId, ref: 'Hotel', required: true, index: true })
@@ -43,6 +61,9 @@ export class Room {
 
   @Prop({ type: [DateRangeWindow], default: [] })
   blockedRanges: DateRangeWindow[];
+
+  @Prop({ type: [ActiveRoomLock], default: [] })
+  activeLocks: ActiveRoomLock[];
 }
 
 export const RoomSchema = SchemaFactory.createForClass(Room);

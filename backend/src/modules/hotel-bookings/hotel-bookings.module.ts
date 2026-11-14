@@ -4,6 +4,8 @@ import { HotelBooking, HotelBookingSchema } from './schemas/hotel-booking.schema
 import { Review, ReviewSchema } from './schemas/review.schema';
 import { Hotel, HotelSchema } from '../hotels/schemas/hotel.schema';
 import { Room, RoomSchema } from '../hotels/schemas/room.schema';
+import { Refund, RefundSchema } from '../payments/schemas/refund.schema';
+import { Payment, PaymentSchema } from '../payments/schemas/payment.schema';
 import { HotelsModule } from '../hotels/hotels.module';
 import { HotelBookingsService } from './hotel-bookings.service';
 import { HotelBookingsController } from './hotel-bookings.controller';
@@ -15,6 +17,8 @@ import { HotelBookingsController } from './hotel-bookings.controller';
       { name: Review.name, schema: ReviewSchema },
       { name: Hotel.name, schema: HotelSchema },
       { name: Room.name, schema: RoomSchema },
+      { name: Refund.name, schema: RefundSchema },
+      { name: Payment.name, schema: PaymentSchema },
     ]),
     HotelsModule,
   ],

@@ -8,10 +8,13 @@ import {
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { Connection, Model, Types } from 'mongoose';
+import Stripe from 'stripe';
 import { HotelBooking, HotelBookingDocument } from './schemas/hotel-booking.schema';
 import { Review, ReviewDocument } from './schemas/review.schema';
 import { Hotel, HotelDocument } from '../hotels/schemas/hotel.schema';
 import { Room, RoomDocument } from '../hotels/schemas/room.schema';
+import { Refund, RefundDocument } from '../payments/schemas/refund.schema';
+import { Payment, PaymentDocument } from '../payments/schemas/payment.schema';
 import { HotelsService } from '../hotels/hotels.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -27,28 +30,47 @@ const HOLD_DURATION_MS = 10 * 60 * 1000; // 10 minutes (HTL-18)
 
 @Injectable()
 export class HotelBookingsService {
+  private stripe: Stripe | null = null;
+
   constructor(
     @InjectModel(HotelBooking.name)
     private readonly hotelBookingModel: Model<HotelBookingDocument>,
     @InjectModel(Review.name) private readonly reviewModel: Model<ReviewDocument>,
     @InjectModel(Hotel.name) private readonly hotelModel: Model<HotelDocument>,
     @InjectModel(Room.name) private readonly roomModel: Model<RoomDocument>,
+    @InjectModel(Refund.name) private readonly refundModel: Model<RefundDocument>,
+    @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly hotelsService: HotelsService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+  ) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (key && key.startsWith('sk_test_') && !key.includes('replace_with')) {
+      this.stripe = new Stripe(key, { apiVersion: '2023-10-16' as any });
+    }
+  }
 
   @Cron(CronExpression.EVERY_MINUTE)
   async syncReservationStates() {
     const now = new Date();
-    // Expire unpaid 10-minute holds (HTL-18, GEN-11)
-    await this.hotelBookingModel.updateMany(
-      {
-        status: BookingLifecycleStatus.PENDING_PAYMENT,
-        holdExpiresAt: { $lte: now },
-      },
-      { $set: { status: BookingLifecycleStatus.EXPIRED } },
-    );
+
+    // Atomically expire unpaid 10-minute holds and remove their room locks (HTL-18, GEN-11)
+    while (true) {
+      const expired = await this.hotelBookingModel.findOneAndUpdate(
+        {
+          status: BookingLifecycleStatus.PENDING_PAYMENT,
+          holdExpiresAt: { $lte: now },
+        },
+        { $set: { status: BookingLifecycleStatus.EXPIRED } },
+        { new: true },
+      );
+      if (!expired) break;
+
+      await this.roomModel.updateMany(
+        { _id: { $in: expired.roomIds } },
+        { $pull: { activeLocks: { bookingReference: expired.bookingReference } } },
+      );
+    }
 
     // Transition Confirmed reservations whose check-out date has passed to Completed (HTL-23, GEN-11)
     await this.hotelBookingModel.updateMany(
@@ -77,6 +99,66 @@ export class HotelBookingsService {
       }
     }
     return 0;
+  }
+
+  private async atomicallyLockRoomForDates(
+    roomId: Types.ObjectId,
+    checkIn: Date,
+    checkOut: Date,
+    bookingReference: string,
+    holdExpiresAt: Date,
+  ) {
+    const now = new Date();
+    // Clean expired hold locks on this room first
+    await this.roomModel.updateOne(
+      { _id: roomId },
+      {
+        $pull: {
+          activeLocks: {
+            lockType: 'hold',
+            expiresAt: { $lte: now },
+          },
+        },
+      },
+    );
+
+    // Atomically push lock ONLY IF no active lock or blocked range overlaps [checkIn, checkOut] (HTL-18)
+    const lockedRoom = await this.roomModel.findOneAndUpdate(
+      {
+        _id: roomId,
+        isActive: true,
+        blockedRanges: {
+          $not: {
+            $elemMatch: {
+              startDate: { $lt: checkOut },
+              endDate: { $gt: checkIn },
+            },
+          },
+        },
+        activeLocks: {
+          $not: {
+            $elemMatch: {
+              checkInDate: { $lt: checkOut },
+              checkOutDate: { $gt: checkIn },
+            },
+          },
+        },
+      },
+      {
+        $push: {
+          activeLocks: {
+            bookingReference,
+            checkInDate: checkIn,
+            checkOutDate: checkOut,
+            lockType: 'hold',
+            expiresAt: holdExpiresAt,
+          },
+        },
+      },
+      { new: true },
+    );
+
+    return lockedRoom;
   }
 
   async createHotelBookingHold(userId: string, dto: CreateHotelBookingDto) {
@@ -139,27 +221,6 @@ export class HotelBookingsService {
       );
     }
 
-    const now = new Date();
-    const overlappingReservations = await this.hotelBookingModel
-      .find({
-        hotelId: hotel._id,
-        roomIds: { $in: roomObjectIds },
-        checkInDate: { $lt: checkOut },
-        checkOutDate: { $gt: checkIn },
-        $or: [
-          { status: BookingLifecycleStatus.CONFIRMED },
-          {
-            status: BookingLifecycleStatus.PENDING_PAYMENT,
-            holdExpiresAt: { $gt: now },
-          },
-        ],
-      })
-      .lean();
-
-    // HTL-18: If any room overlaps a Confirmed reservation, an unexpired hold or a blocked range, the whole request is rejected and nothing is held
-    const allocations = [];
-    let totalAmount = 0;
-
     for (const selection of dto.rooms) {
       const roomDoc = roomDocs.find((d) => d._id.toString() === selection.roomId);
       const roomGuests = selection.adults + (selection.children || 0);
@@ -171,17 +232,52 @@ export class HotelBookingsService {
           `Guests (${roomGuests}) for room ${roomDoc.roomNumber} exceed its maximum occupancy (${roomDoc.maxOccupancy}) (HTL-16).`,
         );
       }
+      if (roomDoc.availableRanges && roomDoc.availableRanges.length > 0) {
+        const covered = roomDoc.availableRanges.some(
+          (r: any) => new Date(r.startDate) <= checkIn && new Date(r.endDate) >= checkOut,
+        );
+        if (!covered) {
+          throw new ConflictException(
+            `Room ${roomDoc.roomNumber} is outside its bookable date ranges (HTL-04, HTL-18).`,
+          );
+        }
+      }
+    }
 
-      const roomOverlaps = overlappingReservations.filter((b) =>
-        b.roomIds.some((id) => id.toString() === roomDoc._id.toString()),
+    const bookingReference = `HTL-${Date.now().toString(36).toUpperCase()}-${Math.random()
+      .toString(36)
+      .substring(2, 6)
+      .toUpperCase()}`;
+    const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MS);
+
+    // Atomically lock each selected room; if any room fails, roll back all acquired locks immediately (HTL-18)
+    const lockedRoomIds: Types.ObjectId[] = [];
+    const allocations = [];
+    let totalAmount = 0;
+
+    for (const selection of dto.rooms) {
+      const roomDoc = roomDocs.find((d) => d._id.toString() === selection.roomId);
+      const locked = await this.atomicallyLockRoomForDates(
+        roomDoc._id,
+        checkIn,
+        checkOut,
+        bookingReference,
+        holdExpiresAt,
       );
 
-      if (!this.hotelsService.isRoomFreeForStay(roomDoc, checkIn, checkOut, roomOverlaps)) {
+      if (!locked) {
+        if (lockedRoomIds.length > 0) {
+          await this.roomModel.updateMany(
+            { _id: { $in: lockedRoomIds } },
+            { $pull: { activeLocks: { bookingReference } } },
+          );
+        }
         throw new ConflictException(
-          `Room ${roomDoc.roomNumber} is not available for the selected dates (overlaps a reservation, active hold, or blocked range) (HTL-18).`,
+          `Room ${roomDoc.roomNumber} is already reserved or held for overlapping dates (HTL-18).`,
         );
       }
 
+      lockedRoomIds.push(roomDoc._id);
       allocations.push({
         roomId: roomDoc._id,
         roomNumber: roomDoc.roomNumber,
@@ -189,17 +285,10 @@ export class HotelBookingsService {
         children: selection.children || 0,
         pricePerNightAtBooking: roomDoc.pricePerNight,
       });
-
       totalAmount += roomDoc.pricePerNight * nights;
     }
 
     totalAmount = Math.round(totalAmount * 100) / 100;
-    const bookingReference = `HTL-${Date.now().toString(36).toUpperCase()}-${Math.random()
-      .toString(36)
-      .substring(2, 6)
-      .toUpperCase()}`;
-
-    const holdExpiresAt = new Date(Date.now() + HOLD_DURATION_MS);
 
     const reservation = await this.hotelBookingModel.create({
       userId: new Types.ObjectId(userId),
@@ -283,9 +372,9 @@ export class HotelBookingsService {
       throw new ForbiddenException('You do not have permission to view this reservation (ACC-11).');
     }
 
-    const refundRecord = await this.connection
-      .collection('refunds')
-      .findOne({ bookingType: 'hotel', bookingId: reservation._id });
+    const refundRecord = await this.refundModel
+      .findOne({ bookingType: 'hotel', bookingId: reservation._id })
+      .lean();
 
     return {
       ...reservation,
@@ -293,9 +382,9 @@ export class HotelBookingsService {
     };
   }
 
-  async cancelHotelBookingByUser(userId: string, bookingId: string, confirmed = true) {
+  async cancelHotelBookingByUser(userId: string, bookingId: string, confirmed = false) {
     if (!confirmed) {
-      throw new BadRequestException('Confirmation is required to cancel a reservation (HTL-21, GEN-03).');
+      throw new BadRequestException('Confirmation is required to cancel a reservation (pass confirm=true) (HTL-21, GEN-03).');
     }
 
     await this.syncReservationStates();
@@ -332,22 +421,47 @@ export class HotelBookingsService {
     reservation.refundAmount = refundAmount;
     await reservation.save();
 
+    // Release room locks for these dates (HTL-21)
+    await this.roomModel.updateMany(
+      { _id: { $in: reservation.roomIds } },
+      { $pull: { activeLocks: { bookingReference: reservation.bookingReference } } },
+    );
+
     let refundRecord: any = null;
     if (refundAmount > 0) {
-      const res = await this.connection.collection('refunds').insertOne({
+      let stripeRefundId = `re_hotel_${Date.now()}`;
+      let refundStatus: 'Pending' | 'Refunded' | 'Failed' = 'Refunded';
+
+      const payment = await this.paymentModel.findOne({
+        bookingType: 'hotel',
+        bookingId: reservation._id,
+        status: 'succeeded',
+      });
+
+      if (this.stripe && payment && payment.stripePaymentIntentId && !payment.stripePaymentIntentId.startsWith('pi_test_')) {
+        try {
+          const stripeRefund = await this.stripe.refunds.create({
+            payment_intent: payment.stripePaymentIntentId,
+            amount: Math.round(refundAmount * 100),
+          });
+          stripeRefundId = stripeRefund.id;
+          refundStatus = stripeRefund.status === 'succeeded' ? 'Refunded' : 'Pending';
+        } catch {
+          refundStatus = 'Failed';
+        }
+      }
+
+      refundRecord = await this.refundModel.create({
         bookingType: 'hotel',
         bookingId: reservation._id,
         userId: reservation.userId,
         amount: refundAmount,
         currency: reservation.currency,
         refundPercentage,
+        stripeRefundId,
+        status: refundStatus,
         reason: 'User-initiated hotel reservation cancellation',
-        status: 'Refunded',
-        stripeRefundId: `re_hotel_${Date.now()}`,
-        createdAt: new Date(),
-        updatedAt: new Date(),
       });
-      refundRecord = { id: res.insertedId, amount: refundAmount, status: 'Refunded' };
     }
 
     await this.notificationsService.createNotification({
@@ -490,7 +604,6 @@ export class HotelBookingsService {
       this.reviewModel.countDocuments(filter),
     ]);
 
-    // ACC-12: Deactivated user reviews are shown as "Deleted user"
     const formatted = reviews.map((r: any) => {
       const author = r.userId;
       const isDeactivated = !author || author.status === AccountStatus.DEACTIVATED;
