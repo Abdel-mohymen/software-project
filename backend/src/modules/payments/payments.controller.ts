@@ -2,10 +2,14 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   Param,
   Post,
+  RawBodyRequest,
+  Req,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Request } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { PaymentsService } from './payments.service';
@@ -75,10 +79,19 @@ export class PaymentsController {
   @Post('payments/webhook')
   @ApiOperation({
     summary:
-      'Stripe webhook endpoint verifying payment outcome before confirming booking (PAY-01)',
+      'Stripe webhook endpoint verifying stripe-signature header before confirming booking (PAY-01)',
   })
-  async stripeWebhook(@Body() payload: StripeWebhookPayloadDto) {
-    return this.paymentsService.handleWebhook(payload);
+  @ApiHeader({
+    name: 'stripe-signature',
+    required: true,
+    description: 'Stripe webhook HMAC signature (use testStripeSignature returned from POST /api/payments when testing in Swagger)',
+  })
+  async stripeWebhook(
+    @Req() req: RawBodyRequest<Request>,
+    @Headers('stripe-signature') signature: string,
+    @Body() payload: StripeWebhookPayloadDto,
+  ) {
+    return this.paymentsService.handleWebhook(req.rawBody, payload, signature);
   }
 
   @Get('refunds/:id')
