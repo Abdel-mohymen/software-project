@@ -39,8 +39,13 @@ export class JwtAuthGuard implements CanActivate {
     }
 
     try {
+      const secret = process.env.JWT_ACCESS_SECRET;
+      if (!secret && process.env.NODE_ENV === 'production') {
+        throw new Error('JWT_ACCESS_SECRET must be configured in environment variables.');
+      }
+
       const payload = await this.jwtService.verifyAsync(token, {
-        secret: process.env.JWT_ACCESS_SECRET || 'giu_dev_access_secret',
+        secret: secret || 'giu_dev_access_secret_fallback',
       });
 
       const user = await this.userModel.findById(payload.sub);
@@ -50,14 +55,14 @@ export class JwtAuthGuard implements CanActivate {
       }
 
       if (user.status === AccountStatus.SUSPENDED) {
-        response.clearCookie('access_token');
-        response.clearCookie('refresh_token');
+        response.clearCookie('access_token', { path: '/' });
+        response.clearCookie('refresh_token', { path: '/' });
         throw new ForbiddenException('Account suspended. Please contact an administrator.');
       }
 
       if (user.status === AccountStatus.DEACTIVATED) {
-        response.clearCookie('access_token');
-        response.clearCookie('refresh_token');
+        response.clearCookie('access_token', { path: '/' });
+        response.clearCookie('refresh_token', { path: '/' });
         throw new ForbiddenException('Account has been deactivated.');
       }
 
@@ -67,8 +72,8 @@ export class JwtAuthGuard implements CanActivate {
         if (elapsed > INACTIVITY_TIMEOUT_MS) {
           user.refreshTokenHash = null;
           await user.save();
-          response.clearCookie('access_token');
-          response.clearCookie('refresh_token');
+          response.clearCookie('access_token', { path: '/' });
+          response.clearCookie('refresh_token', { path: '/' });
           if (isPublic) return true;
           throw new UnauthorizedException('Session expired due to 30 minutes of inactivity.');
         }
@@ -89,6 +94,24 @@ export class JwtAuthGuard implements CanActivate {
 
       user.lastActivityAt = new Date();
       await user.save();
+
+      // True sliding 30-minute session: reissue fresh 30m access_token cookie on active request (ACC-06, ACC-19)
+      const freshAccessToken = await this.jwtService.signAsync(
+        { sub: user._id.toString(), email: user.email, role: user.role },
+        {
+          secret: secret || 'giu_dev_access_secret_fallback',
+          expiresIn: '30m',
+        },
+      );
+      const isSecure =
+        process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production';
+      response.cookie('access_token', freshAccessToken, {
+        httpOnly: true,
+        secure: isSecure,
+        sameSite: 'lax',
+        maxAge: INACTIVITY_TIMEOUT_MS,
+        path: '/',
+      });
 
       request.user = {
         id: user._id.toString(),

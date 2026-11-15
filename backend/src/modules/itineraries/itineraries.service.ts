@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -33,16 +34,7 @@ import {
 } from './dto/itinerary.dto';
 import { UserRole } from '../../common/enums/role.enum';
 import { paginateResult } from '../../common/dto/pagination.dto';
-
-const FALLBACK_USD_RATES: Record<string, number> = {
-  USD: 1,
-  EUR: 0.92,
-  GBP: 0.79,
-  EGP: 49.25,
-  AED: 3.67,
-  JPY: 153.4,
-  SAR: 3.75,
-};
+import { buildSafeRegex } from '../../common/utils/regex.util';
 
 @Injectable()
 export class ItinerariesService {
@@ -81,70 +73,72 @@ export class ItinerariesService {
     }
   }
 
-  async getOrFetchExchangeRates(baseCurrency = 'USD') {
+  async getOrFetchExchangeRates(baseCurrency = 'USD'): Promise<{
+    baseCurrency: string;
+    rateDate: string;
+    rates: Record<string, number>;
+    rateSource: 'live_api' | 'cached_db';
+  }> {
     const today = new Date().toISOString().slice(0, 10);
     const cachedToday = await this.exchangeRateModel
       .findOne({ baseCurrency: 'USD', rateDate: today })
       .lean();
 
     if (cachedToday) {
-      return cachedToday;
+      return { ...cachedToday, rateSource: 'cached_db' };
     }
 
-    // Attempt live FXRatesAPI fetch once per day (ITN-18)
+    // Attempt live FXRatesAPI fetch using FXRATES_API_KEY if provided (ITN-18)
+    const apiUrl = process.env.FXRATES_API_URL || 'https://api.fxratesapi.com/latest';
+    const apiKey = process.env.FXRATES_API_KEY;
+    const queryStr = apiKey
+      ? `?base=USD&api_key=${encodeURIComponent(apiKey)}`
+      : `?base=USD`;
+
     try {
-      const apiUrl = process.env.FXRATES_API_URL || 'https://api.fxratesapi.com/latest';
-      const url = `${apiUrl}?base=USD`;
       const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 3500);
-      const response = await fetch(url, { signal: controller.signal });
+      const timeout = setTimeout(() => controller.abort(), 4000);
+      const response = await fetch(`${apiUrl}${queryStr}`, {
+        signal: controller.signal,
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+      });
       clearTimeout(timeout);
 
       if (response.ok) {
         const data: any = await response.json();
-        if (data && data.rates) {
+        if (data && data.rates && typeof data.rates === 'object') {
           const saved = await this.exchangeRateModel.findOneAndUpdate(
             { baseCurrency: 'USD', rateDate: today },
             {
               $set: {
                 baseCurrency: 'USD',
                 rateDate: today,
-                rates: { ...FALLBACK_USD_RATES, ...data.rates, USD: 1 },
+                rates: { ...data.rates, USD: 1 },
                 fetchedAt: new Date(),
               },
             },
             { upsert: true, new: true },
           );
-          return saved.toObject();
+          return { ...saved.toObject(), rateSource: 'live_api' };
         }
       }
-    } catch (err) {
-      this.logger.warn('FXRatesAPI unreachable or offline; using cached/fallback exchange rates (ITN-18).');
+    } catch (err: any) {
+      this.logger.warn(`FXRatesAPI request failed (${err?.message || 'network error'}); checking DB cache (ITN-18).`);
     }
 
-    // Fallback to most recent cached rate in DB or built-in rates (ITN-18)
+    // Fallback to most recent cached rate in MongoDB if available; otherwise throw 503 ServiceUnavailableException (ITN-18)
     const lastCached = await this.exchangeRateModel
       .findOne({ baseCurrency: 'USD' })
       .sort({ rateDate: -1 })
       .lean();
 
     if (lastCached) {
-      return lastCached;
+      return { ...lastCached, rateSource: 'cached_db' };
     }
 
-    const seeded = await this.exchangeRateModel.findOneAndUpdate(
-      { baseCurrency: 'USD', rateDate: today },
-      {
-        $set: {
-          baseCurrency: 'USD',
-          rateDate: today,
-          rates: FALLBACK_USD_RATES,
-          fetchedAt: new Date(),
-        },
-      },
-      { upsert: true, new: true },
+    throw new ServiceUnavailableException(
+      'FXRatesAPI exchange-rate service is currently unreachable and no cached exchange rates are available in the database (ITN-18).',
     );
-    return seeded.toObject();
   }
 
   private convertCurrency(
@@ -159,8 +153,10 @@ export class ItinerariesService {
 
     const fromRate = usdRates[from];
     const toRate = usdRates[to];
-    if (!fromRate || !toRate) {
-      throw new BadRequestException(`Unavailable exchange rate for currency conversion (${from} -> ${to}).`);
+    if (fromRate === undefined || toRate === undefined || fromRate <= 0 || toRate <= 0) {
+      throw new BadRequestException(
+        `Unavailable exchange rate for currency conversion (${from} -> ${to}) (ITN-18).`,
+      );
     }
 
     const inUsd = amount / fromRate;
@@ -200,7 +196,6 @@ export class ItinerariesService {
   }
 
   private buildCityGroups(days: any[], daySubtotals: Record<string, number>) {
-    // ITN-09: display consecutive days in the same city as a group, with the group's day count and budget subtotal
     const groups: any[] = [];
     for (const day of days) {
       const daySubtotal = daySubtotals[day._id.toString()] || 0;
@@ -306,9 +301,9 @@ export class ItinerariesService {
     return itinerary;
   }
 
-  async deleteItinerary(userId: string, itineraryId: string, confirmed = true) {
+  async deleteItinerary(userId: string, itineraryId: string, confirmed = false) {
     if (!confirmed) {
-      throw new BadRequestException('Confirmation is required to delete an itinerary (ITN-01, GEN-03).');
+      throw new BadRequestException('Confirmation is required to delete an itinerary (pass confirm=true) (ITN-01, GEN-03).');
     }
     const itinerary = await this.itineraryModel.findById(itineraryId);
     if (!itinerary) {
@@ -710,7 +705,6 @@ export class ItinerariesService {
       byDayMap.set(dayKey, Math.round(((byDayMap.get(dayKey) || 0) + converted) * 100) / 100);
     }
 
-    // ITN-14: Totals include activity costs from ITN-10 (counted under Activities)
     for (const act of activities) {
       if (act.cost && act.cost > 0) {
         const converted = this.convertCurrency(act.cost, act.currency || 'USD', displayCurrency, rates);
@@ -720,7 +714,6 @@ export class ItinerariesService {
       }
     }
 
-    // ITN-14 & ITN-16: intercity transport entries
     for (const tc of transportCosts) {
       const converted = this.convertCurrency(tc.amount, tc.currency, displayCurrency, rates);
       byCategory.intercity_transportation =
@@ -749,6 +742,7 @@ export class ItinerariesService {
       itineraryId: itinerary._id,
       displayCurrency,
       exchangeRateDate: rateRecord.rateDate,
+      exchangeRateSource: rateRecord.rateSource,
       byCategory,
       byDay,
       grandTotal,
@@ -764,8 +758,8 @@ export class ItinerariesService {
     if (query.city) {
       filter['days.city_id'] = query.city.trim().toLowerCase();
     }
-    if (query.keyword) {
-      const regex = new RegExp(query.keyword.trim(), 'i');
+    if (query.keyword && query.keyword.trim()) {
+      const regex = buildSafeRegex(query.keyword);
       filter.$or = [
         { title: regex },
         { countries: regex },
@@ -804,7 +798,7 @@ export class ItinerariesService {
     }
 
     return this.getItineraryById(
-      { id: itinerary.ownerId?._id?.toString() || itinerary.ownerId?.toString(), role: UserRole.ADMIN },
+      { id: (itinerary.ownerId as any)?._id?.toString() || itinerary.ownerId?.toString(), role: UserRole.ADMIN },
       itineraryId,
       currency || 'USD',
     );
@@ -914,7 +908,6 @@ export class ItinerariesService {
       throw new BadRequestException('Itinerary has no city groups yet. Add days first (ITN-25).');
     }
 
-    // ITN-25: check-in = date of group's first day, check-out = day after its last day
     const lastDayDate = new Date(group.endDate);
     const checkOutDate = new Date(lastDayDate.getTime() + 24 * 60 * 60 * 1000)
       .toISOString()

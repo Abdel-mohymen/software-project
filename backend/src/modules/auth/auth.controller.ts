@@ -7,10 +7,11 @@ import {
   Patch,
   Post,
   Query,
+  Req,
   Res,
 } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { Public } from '../../common/decorators/public.decorator';
 import { CurrentUser } from '../../common/decorators/current-user.decorator';
 import { AuthService } from './auth.service';
@@ -57,7 +58,7 @@ export class AuthController {
       httpOnly: true,
       secure: isSecure,
       sameSite: 'lax',
-      maxAge: 30 * 60 * 1000, // 30 minutes
+      maxAge: 30 * 60 * 1000, // 30 minutes sliding
       path: '/',
     });
 
@@ -73,6 +74,27 @@ export class AuthController {
       message: 'Login successful.',
       user: result.user,
     };
+  }
+
+  @Public()
+  @Post('refresh')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Refresh access_token cookie using httpOnly refresh_token cookie (ACC-06, ACC-19)' })
+  async refresh(@Req() req: Request, @Res({ passthrough: true }) res: Response) {
+    const refreshToken = req.cookies?.refresh_token;
+    const { accessToken } = await this.authService.refreshAccessToken(refreshToken);
+    const isSecure =
+      process.env.COOKIE_SECURE === 'true' || process.env.NODE_ENV === 'production';
+
+    res.cookie('access_token', accessToken, {
+      httpOnly: true,
+      secure: isSecure,
+      sameSite: 'lax',
+      maxAge: 30 * 60 * 1000,
+      path: '/',
+    });
+
+    return { message: 'Access token refreshed.' };
   }
 
   @Post('logout')

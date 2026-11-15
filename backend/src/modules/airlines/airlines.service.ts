@@ -47,6 +47,10 @@ export class AirlinesService {
     });
   }
 
+  async listAirlines() {
+    return this.airlineModel.find().sort({ name: 1 }).lean();
+  }
+
   async getAirlineById(id: string) {
     const airline = await this.airlineModel.findById(id).lean();
     if (!airline) {
@@ -114,12 +118,14 @@ export class AirlinesService {
     return airline;
   }
 
-  computeRefundPercentage(tiers: { daysBeforeDeparture: number; refundPercentage: number }[], departureUtc: Date): number {
+  computeRefundPercentage(
+    tiers: { daysBeforeDeparture: number; refundPercentage: number }[],
+    departureUtc: Date,
+  ): number {
     const msRemaining = new Date(departureUtc).getTime() - Date.now();
     const daysRemaining = Math.floor(msRemaining / (1000 * 60 * 60 * 24));
     if (daysRemaining < 0) return 0;
 
-    // FLT-09: tier with the highest threshold not exceeding the days remaining
     const sorted = [...(tiers || [])].sort(
       (a, b) => b.daysBeforeDeparture - a.daysBeforeDeparture,
     );

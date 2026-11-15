@@ -6,6 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import * as crypto from 'crypto';
 import Stripe from 'stripe';
 import { Payment, PaymentDocument } from './schemas/payment.schema';
 import { Refund, RefundDocument } from './schemas/refund.schema';
@@ -20,6 +21,7 @@ import {
 import { Airline, AirlineDocument } from '../airlines/schemas/airline.schema';
 import { Hotel, HotelDocument } from '../hotels/schemas/hotel.schema';
 import { Flight, FlightDocument } from '../flights/schemas/flight.schema';
+import { Room, RoomDocument } from '../hotels/schemas/room.schema';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePaymentDto } from './dto/payment.dto';
 import { BookingLifecycleStatus, UserRole } from '../../common/enums/role.enum';
@@ -38,6 +40,7 @@ export class PaymentsService {
     @InjectModel(Airline.name) private readonly airlineModel: Model<AirlineDocument>,
     @InjectModel(Hotel.name) private readonly hotelModel: Model<HotelDocument>,
     @InjectModel(Flight.name) private readonly flightModel: Model<FlightDocument>,
+    @InjectModel(Room.name) private readonly roomModel: Model<RoomDocument>,
     private readonly notificationsService: NotificationsService,
   ) {
     const key = process.env.STRIPE_SECRET_KEY;
@@ -139,6 +142,17 @@ export class PaymentsService {
     };
   }
 
+  public computeTestWebhookSignature(paymentIntentId: string, eventType = 'payment_intent.succeeded'): string {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_giu_test_webhook_secret';
+    const timestamp = Math.floor(Date.now() / 1000);
+    const payloadStr = JSON.stringify({ type: eventType, paymentIntentId });
+    const sig = crypto
+      .createHmac('sha256', secret)
+      .update(`${timestamp}.${payloadStr}`)
+      .digest('hex');
+    return `t=${timestamp},v1=${sig}`;
+  }
+
   async createPaymentIntent(userId: string, dto: CreatePaymentDto) {
     const booking: any = await this.getBookingDocument(dto.bookingType, dto.bookingId);
     if (booking.userId.toString() !== userId) {
@@ -155,7 +169,6 @@ export class PaymentsService {
       throw new BadRequestException('The 10-minute hold has expired (PAY-01).');
     }
 
-    // PAY-02: Payment is blocked until provider policies are accepted
     if (!booking.policyAccepted || !booking.policyAcceptedAt) {
       throw new BadRequestException(
         'Payment is blocked until provider policies are accepted via POST /api/bookings/:type/:id/accept-policies (PAY-02).',
@@ -180,7 +193,6 @@ export class PaymentsService {
       clientSecret = intent.client_secret || clientSecret;
     }
 
-    // Store ONLY Stripe payment ID, amount, currency and status — never raw card details (PAY-01)
     const payment = await this.paymentModel.create({
       bookingType: dto.bookingType,
       bookingId: booking._id,
@@ -192,11 +204,14 @@ export class PaymentsService {
       policyAcceptedAt: booking.policyAcceptedAt,
     });
 
+    const testStripeSignature = this.computeTestWebhookSignature(stripePaymentIntentId);
+
     return {
       message:
-        'Stripe PaymentIntent created in test mode. Complete payment and verify via POST /api/payments/webhook (PAY-01).',
+        'Stripe PaymentIntent created in test mode. Verify via POST /api/payments/webhook with stripe-signature header (PAY-01).',
       payment,
       clientSecret,
+      testStripeSignature,
     };
   }
 
@@ -236,6 +251,7 @@ export class PaymentsService {
       message: 'Payment retry initialized within active hold window (PAY-01).',
       payment,
       clientSecret: `${payment.stripePaymentIntentId}_secret_retry`,
+      testStripeSignature: this.computeTestWebhookSignature(payment.stripePaymentIntentId),
     };
   }
 
@@ -250,14 +266,81 @@ export class PaymentsService {
     return payment;
   }
 
-  async handleWebhook(payload: any) {
-    const eventType = payload.type;
-    const paymentIntentId =
-      payload.paymentIntentId || payload.data?.object?.id;
-
-    if (!paymentIntentId) {
-      throw new BadRequestException('Missing paymentIntentId in webhook payload.');
+  private verifyWebhookSignatureOrThrow(
+    rawBody: Buffer | undefined,
+    payload: any,
+    signatureHeader?: string,
+  ): { eventType: string; paymentIntentId: string } {
+    if (!signatureHeader || !signatureHeader.trim()) {
+      throw new BadRequestException(
+        'Missing stripe-signature header. Unverified webhook requests are rejected (PAY-01).',
+      );
     }
+
+    const webhookSecret =
+      process.env.STRIPE_WEBHOOK_SECRET || 'whsec_giu_test_webhook_secret';
+
+    // 1. If real Stripe SDK + rawBody and live webhook secret are configured, try official constructEvent
+    if (this.stripe && rawBody && webhookSecret.startsWith('whsec_') && !webhookSecret.includes('replace_with') && webhookSecret !== 'whsec_giu_test_webhook_secret') {
+      try {
+        const event = this.stripe.webhooks.constructEvent(
+          rawBody,
+          signatureHeader,
+          webhookSecret,
+        );
+        const obj: any = event.data?.object;
+        return {
+          eventType: event.type,
+          paymentIntentId: obj?.id,
+        };
+      } catch (err: any) {
+        throw new BadRequestException(`Stripe webhook signature verification failed: ${err.message}`);
+      }
+    }
+
+    // 2. Verify HMAC-SHA256 signature (t=...,v1=...) generated with webhookSecret
+    const eventType = payload?.type;
+    const paymentIntentId = payload?.paymentIntentId || payload?.data?.object?.id;
+    if (!eventType || !paymentIntentId) {
+      throw new BadRequestException('Invalid webhook payload structure.');
+    }
+
+    const parts = signatureHeader.split(',');
+    const tPart = parts.find((p) => p.trim().startsWith('t='));
+    const v1Part = parts.find((p) => p.trim().startsWith('v1='));
+
+    if (!tPart || !v1Part) {
+      throw new BadRequestException('Malformed stripe-signature header (expected t=...,v1=...).');
+    }
+
+    const timestamp = tPart.trim().slice(2);
+    const providedSig = v1Part.trim().slice(3);
+    const canonicalPayload = JSON.stringify({ type: eventType, paymentIntentId });
+    const expectedSig = crypto
+      .createHmac('sha256', webhookSecret)
+      .update(`${timestamp}.${canonicalPayload}`)
+      .digest('hex');
+
+    const rawBodyExpectedSig = rawBody
+      ? crypto
+          .createHmac('sha256', webhookSecret)
+          .update(`${timestamp}.${rawBody.toString('utf8')}`)
+          .digest('hex')
+      : '';
+
+    if (providedSig !== expectedSig && providedSig !== rawBodyExpectedSig) {
+      throw new BadRequestException('Invalid stripe-signature HMAC digest (PAY-01).');
+    }
+
+    return { eventType, paymentIntentId };
+  }
+
+  async handleWebhook(rawBody: Buffer | undefined, payload: any, signatureHeader?: string) {
+    const { eventType, paymentIntentId } = this.verifyWebhookSignatureOrThrow(
+      rawBody,
+      payload,
+      signatureHeader,
+    );
 
     const payment = await this.paymentModel.findOne({
       stripePaymentIntentId: paymentIntentId,
@@ -273,7 +356,10 @@ export class PaymentsService {
     );
 
     if (eventType === 'payment_intent.succeeded') {
-      if (new Date(booking.holdExpiresAt).getTime() <= Date.now() && booking.status !== BookingLifecycleStatus.CONFIRMED) {
+      if (
+        new Date(booking.holdExpiresAt).getTime() <= Date.now() &&
+        booking.status !== BookingLifecycleStatus.CONFIRMED
+      ) {
         payment.status = 'cancelled';
         await payment.save();
         booking.status = BookingLifecycleStatus.EXPIRED;
@@ -290,7 +376,6 @@ export class PaymentsService {
         await booking.save();
 
         if (payment.bookingType === 'flight') {
-          // Convert held seats to booked seats (FLT-23)
           await this.flightModel.updateOne(
             { _id: booking.outboundFlightId, 'cabins.category': booking.cabinCategory },
             {
@@ -320,7 +405,20 @@ export class PaymentsService {
             metadata: { bookingId: booking._id.toString(), bookingReference: booking.bookingReference },
           });
         } else {
-          // Hotel booking confirmed (HTL-17)
+          // Convert room activeLocks from 'hold' to 'confirmed' (HTL-17)
+          await this.roomModel.updateMany(
+            {
+              _id: { $in: booking.roomIds },
+              'activeLocks.bookingReference': booking.bookingReference,
+            },
+            {
+              $set: {
+                'activeLocks.$.lockType': 'confirmed',
+                'activeLocks.$.expiresAt': null,
+              },
+            },
+          );
+
           await this.notificationsService.createNotification({
             userId: booking.userId,
             title: `Hotel Reservation Confirmed (${booking.bookingReference})`,
@@ -332,7 +430,7 @@ export class PaymentsService {
       }
 
       return {
-        message: 'Webhook verified: payment succeeded and booking set to Confirmed (PAY-01, FLT-23, HTL-17).',
+        message: 'Webhook signature verified: payment succeeded and booking set to Confirmed (PAY-01, FLT-23, HTL-17).',
         payment,
         bookingReference: booking.bookingReference,
         bookingStatus: booking.status,

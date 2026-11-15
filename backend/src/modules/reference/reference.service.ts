@@ -10,6 +10,8 @@ import { Airport, AirportDocument } from './schemas/airport.schema';
 import { Attraction, AttractionDocument } from './schemas/attraction.schema';
 import { User, UserDocument } from '../users/schemas/user.schema';
 import { AccountStatus, UserRole } from '../../common/enums/role.enum';
+import { parseRfc4180Csv } from '../../common/utils/csv.util';
+import { buildSafeRegex } from '../../common/utils/regex.util';
 
 @Injectable()
 export class ReferenceService implements OnModuleInit {
@@ -34,23 +36,14 @@ export class ReferenceService implements OnModuleInit {
       this.logger.warn(`Reference file not found at ${filePath}`);
       return [];
     }
-    const content = fs.readFileSync(filePath, 'utf-8').trim();
-    const lines = content.split(/\r?\n/).filter((line) => line.trim().length > 0);
-    if (lines.length < 2) return [];
-    const headers = lines[0].split(',').map((h) => h.trim());
-    return lines.slice(1).map((line) => {
-      const values = line.split(',').map((v) => v.trim());
-      const row: Record<string, string> = {};
-      headers.forEach((h, i) => {
-        row[h] = values[i] ?? '';
-      });
-      return row;
-    });
+    const content = fs.readFileSync(filePath, 'utf-8');
+    return parseRfc4180Csv(content);
   }
 
   async seedReferenceData() {
     const countries = this.parseCsv('Countries.csv');
     for (const c of countries) {
+      if (!c.code) continue;
       await this.countryModel.updateOne(
         { code: c.code.toUpperCase() },
         { $set: { code: c.code.toUpperCase(), name: c.name, currency: c.currency.toUpperCase() } },
@@ -60,6 +53,7 @@ export class ReferenceService implements OnModuleInit {
 
     const cities = this.parseCsv('Cities.csv');
     for (const city of cities) {
+      if (!city.city_id) continue;
       await this.cityModel.updateOne(
         { city_id: city.city_id.toLowerCase() },
         {
@@ -75,6 +69,7 @@ export class ReferenceService implements OnModuleInit {
 
     const airports = this.parseCsv('Airports.csv');
     for (const airport of airports) {
+      if (!airport.iata_code) continue;
       await this.airportModel.updateOne(
         { iata_code: airport.iata_code.toUpperCase() },
         {
@@ -92,6 +87,7 @@ export class ReferenceService implements OnModuleInit {
 
     const attractions = this.parseCsv('Attractions.csv');
     for (const att of attractions) {
+      if (!att.attraction_id) continue;
       await this.attractionModel.updateOne(
         { attraction_id: att.attraction_id },
         {
@@ -130,8 +126,8 @@ export class ReferenceService implements OnModuleInit {
 
   async getAirports(query?: string) {
     const filter: any = {};
-    if (query) {
-      const regex = new RegExp(query.trim(), 'i');
+    if (query && query.trim()) {
+      const regex = buildSafeRegex(query);
       filter.$or = [{ iata_code: regex }, { name: regex }, { city_id: regex }, { country_code: regex }];
     }
     return this.airportModel.find(filter).sort({ iata_code: 1 }).lean();

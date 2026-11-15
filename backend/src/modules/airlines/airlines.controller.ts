@@ -36,6 +36,13 @@ export class AirlinesController {
   }
 
   @Public()
+  @Get()
+  @ApiOperation({ summary: 'List all airlines (FLT-01)' })
+  async listAirlines() {
+    return this.airlinesService.listAirlines();
+  }
+
+  @Public()
   @Get(':id')
   @ApiOperation({ summary: 'Get airline profile and policies (FLT-01)' })
   async getAirline(@Param('id') id: string) {
