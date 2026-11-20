@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  OnModuleInit,
 } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
@@ -22,12 +23,14 @@ import { Airline, AirlineDocument } from '../airlines/schemas/airline.schema';
 import { Hotel, HotelDocument } from '../hotels/schemas/hotel.schema';
 import { Flight, FlightDocument } from '../flights/schemas/flight.schema';
 import { Room, RoomDocument } from '../hotels/schemas/room.schema';
+import { FlightBookingsService } from '../flight-bookings/flight-bookings.service';
+import { HotelBookingsService } from '../hotel-bookings/hotel-bookings.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { CreatePaymentDto } from './dto/payment.dto';
 import { BookingLifecycleStatus, UserRole } from '../../common/enums/role.enum';
 
 @Injectable()
-export class PaymentsService {
+export class PaymentsService implements OnModuleInit {
   private stripe: Stripe | null = null;
 
   constructor(
@@ -41,11 +44,38 @@ export class PaymentsService {
     @InjectModel(Hotel.name) private readonly hotelModel: Model<HotelDocument>,
     @InjectModel(Flight.name) private readonly flightModel: Model<FlightDocument>,
     @InjectModel(Room.name) private readonly roomModel: Model<RoomDocument>,
+    private readonly flightBookingsService: FlightBookingsService,
+    private readonly hotelBookingsService: HotelBookingsService,
     private readonly notificationsService: NotificationsService,
   ) {
     const key = process.env.STRIPE_SECRET_KEY;
     if (key && key.startsWith('sk_test_') && !key.includes('replace_with')) {
       this.stripe = new Stripe(key, { apiVersion: '2023-10-16' as any });
+    }
+  }
+
+  onModuleInit() {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secret || secret.trim().length < 12 || secret.includes('replace_with')) {
+      throw new Error(
+        'FATAL: STRIPE_WEBHOOK_SECRET environment variable must be set to a strong non-placeholder secret in .env (PAY-01).',
+      );
+    }
+  }
+
+  private getWebhookSecretOrThrow(): string {
+    const secret = process.env.STRIPE_WEBHOOK_SECRET;
+    if (!secret || secret.trim().length < 12 || secret.includes('replace_with')) {
+      throw new Error('STRIPE_WEBHOOK_SECRET is not configured.');
+    }
+    return secret.trim();
+  }
+
+  private async sweepExpiredHolds(type: 'flight' | 'hotel') {
+    if (type === 'flight') {
+      await this.flightBookingsService.releaseExpiredHoldsAndCompletePastFlights();
+    } else {
+      await this.hotelBookingsService.syncReservationStates();
     }
   }
 
@@ -114,18 +144,17 @@ export class PaymentsService {
   }
 
   async acceptBookingPolicies(userId: string, type: 'flight' | 'hotel', bookingId: string) {
+    await this.sweepExpiredHolds(type);
     const booking: any = await this.getBookingDocument(type, bookingId);
     if (booking.userId.toString() !== userId) {
       throw new ForbiddenException('You can only accept policies for your own bookings.');
     }
 
-    if (booking.status !== BookingLifecycleStatus.PENDING_PAYMENT) {
-      throw new BadRequestException(`Booking is in '${booking.status}' status and cannot be paid.`);
-    }
-
-    if (new Date(booking.holdExpiresAt).getTime() <= Date.now()) {
-      booking.status = BookingLifecycleStatus.EXPIRED;
-      await booking.save();
+    if (
+      booking.status !== BookingLifecycleStatus.PENDING_PAYMENT ||
+      new Date(booking.holdExpiresAt).getTime() <= Date.now()
+    ) {
+      await this.sweepExpiredHolds(type);
       throw new BadRequestException('The 10-minute booking hold has expired (FLT-22, HTL-18).');
     }
 
@@ -142,31 +171,19 @@ export class PaymentsService {
     };
   }
 
-  public computeTestWebhookSignature(paymentIntentId: string, eventType = 'payment_intent.succeeded'): string {
-    const secret = process.env.STRIPE_WEBHOOK_SECRET || 'whsec_giu_test_webhook_secret';
-    const timestamp = Math.floor(Date.now() / 1000);
-    const payloadStr = JSON.stringify({ type: eventType, paymentIntentId });
-    const sig = crypto
-      .createHmac('sha256', secret)
-      .update(`${timestamp}.${payloadStr}`)
-      .digest('hex');
-    return `t=${timestamp},v1=${sig}`;
-  }
-
   async createPaymentIntent(userId: string, dto: CreatePaymentDto) {
+    await this.sweepExpiredHolds(dto.bookingType);
     const booking: any = await this.getBookingDocument(dto.bookingType, dto.bookingId);
     if (booking.userId.toString() !== userId) {
       throw new ForbiddenException('You can only pay for your own bookings.');
     }
 
-    if (booking.status !== BookingLifecycleStatus.PENDING_PAYMENT) {
-      throw new BadRequestException(`Booking is currently '${booking.status}', not Pending Payment.`);
-    }
-
-    if (new Date(booking.holdExpiresAt).getTime() <= Date.now()) {
-      booking.status = BookingLifecycleStatus.EXPIRED;
-      await booking.save();
-      throw new BadRequestException('The 10-minute hold has expired (PAY-01).');
+    if (
+      booking.status !== BookingLifecycleStatus.PENDING_PAYMENT ||
+      new Date(booking.holdExpiresAt).getTime() <= Date.now()
+    ) {
+      await this.sweepExpiredHolds(dto.bookingType);
+      throw new BadRequestException('The 10-minute booking hold has expired (PAY-01).');
     }
 
     if (!booking.policyAccepted || !booking.policyAcceptedAt) {
@@ -204,14 +221,11 @@ export class PaymentsService {
       policyAcceptedAt: booking.policyAcceptedAt,
     });
 
-    const testStripeSignature = this.computeTestWebhookSignature(stripePaymentIntentId);
-
     return {
       message:
-        'Stripe PaymentIntent created in test mode. Verify via POST /api/payments/webhook with stripe-signature header (PAY-01).',
+        'Stripe PaymentIntent created in test mode. Verify outcome via signed POST /api/payments/webhook (PAY-01).',
       payment,
       clientSecret,
-      testStripeSignature,
     };
   }
 
@@ -224,6 +238,7 @@ export class PaymentsService {
       throw new ForbiddenException('Access denied.');
     }
 
+    await this.sweepExpiredHolds(payment.bookingType);
     const booking: any = await this.getBookingDocument(
       payment.bookingType,
       payment.bookingId.toString(),
@@ -235,10 +250,7 @@ export class PaymentsService {
     ) {
       payment.status = 'cancelled';
       await payment.save();
-      if (booking.status === BookingLifecycleStatus.PENDING_PAYMENT) {
-        booking.status = BookingLifecycleStatus.EXPIRED;
-        await booking.save();
-      }
+      await this.sweepExpiredHolds(payment.bookingType);
       throw new BadRequestException(
         'Hold has expired; PaymentIntent cancelled and inventory released (PAY-01).',
       );
@@ -251,7 +263,6 @@ export class PaymentsService {
       message: 'Payment retry initialized within active hold window (PAY-01).',
       payment,
       clientSecret: `${payment.stripePaymentIntentId}_secret_retry`,
-      testStripeSignature: this.computeTestWebhookSignature(payment.stripePaymentIntentId),
     };
   }
 
@@ -277,11 +288,9 @@ export class PaymentsService {
       );
     }
 
-    const webhookSecret =
-      process.env.STRIPE_WEBHOOK_SECRET || 'whsec_giu_test_webhook_secret';
+    const webhookSecret = this.getWebhookSecretOrThrow();
 
-    // 1. If real Stripe SDK + rawBody and live webhook secret are configured, try official constructEvent
-    if (this.stripe && rawBody && webhookSecret.startsWith('whsec_') && !webhookSecret.includes('replace_with') && webhookSecret !== 'whsec_giu_test_webhook_secret') {
+    if (this.stripe && rawBody) {
       try {
         const event = this.stripe.webhooks.constructEvent(
           rawBody,
@@ -293,12 +302,11 @@ export class PaymentsService {
           eventType: event.type,
           paymentIntentId: obj?.id,
         };
-      } catch (err: any) {
-        throw new BadRequestException(`Stripe webhook signature verification failed: ${err.message}`);
+      } catch {
+        // Fall through to canonical HMAC verification below if payload was parsed by NestJS test client
       }
     }
 
-    // 2. Verify HMAC-SHA256 signature (t=...,v1=...) generated with webhookSecret
     const eventType = payload?.type;
     const paymentIntentId = payload?.paymentIntentId || payload?.data?.object?.id;
     if (!eventType || !paymentIntentId) {
@@ -350,90 +358,123 @@ export class PaymentsService {
       throw new NotFoundException(`Payment with Stripe ID '${paymentIntentId}' not found.`);
     }
 
-    const booking: any = await this.getBookingDocument(
-      payment.bookingType,
-      payment.bookingId.toString(),
-    );
-
     if (eventType === 'payment_intent.succeeded') {
-      if (
-        new Date(booking.holdExpiresAt).getTime() <= Date.now() &&
-        booking.status !== BookingLifecycleStatus.CONFIRMED
-      ) {
+      const now = new Date();
+      const bookingModel: Model<any> =
+        payment.bookingType === 'flight' ? this.flightBookingModel : this.hotelBookingModel;
+
+      const transitionedBooking = await bookingModel.findOneAndUpdate(
+        {
+          _id: payment.bookingId,
+          status: BookingLifecycleStatus.PENDING_PAYMENT,
+          holdExpiresAt: { $gt: now },
+        },
+        {
+          $set: {
+            status: BookingLifecycleStatus.CONFIRMED,
+            confirmedAt: now,
+          },
+        },
+        { new: true },
+      );
+
+      if (!transitionedBooking) {
+        const currentBooking: any = await this.getBookingDocument(
+          payment.bookingType,
+          payment.bookingId.toString(),
+        );
+        if (currentBooking.status === BookingLifecycleStatus.CONFIRMED) {
+          if (payment.status !== 'succeeded') {
+            payment.status = 'succeeded';
+            await payment.save();
+          }
+          return {
+            message: 'Webhook already processed (idempotent); booking is Confirmed.',
+            payment,
+            bookingReference: currentBooking.bookingReference,
+            bookingStatus: currentBooking.status,
+          };
+        }
+
         payment.status = 'cancelled';
         await payment.save();
-        booking.status = BookingLifecycleStatus.EXPIRED;
-        await booking.save();
-        throw new BadRequestException('Payment arrived after hold expired; booking was not confirmed.');
+        // Delegate hold expiration & inventory release to the atomic sweeper so seats/locks are NEVER leaked!
+        await this.sweepExpiredHolds(payment.bookingType);
+        throw new BadRequestException('Payment arrived after hold expired; booking was not confirmed and inventory was released.');
       }
 
       payment.status = 'succeeded';
       await payment.save();
 
-      if (booking.status !== BookingLifecycleStatus.CONFIRMED) {
-        booking.status = BookingLifecycleStatus.CONFIRMED;
-        booking.confirmedAt = new Date();
-        await booking.save();
-
-        if (payment.bookingType === 'flight') {
+      if (payment.bookingType === 'flight') {
+        await this.flightModel.updateOne(
+          {
+            _id: transitionedBooking.outboundFlightId,
+            'cabins.category': transitionedBooking.cabinCategory,
+          },
+          {
+            $inc: {
+              'cabins.$.heldSeats': -transitionedBooking.seatsReserved,
+              'cabins.$.bookedSeats': transitionedBooking.seatsReserved,
+            },
+          },
+        );
+        if (transitionedBooking.returnFlightId) {
           await this.flightModel.updateOne(
-            { _id: booking.outboundFlightId, 'cabins.category': booking.cabinCategory },
+            {
+              _id: transitionedBooking.returnFlightId,
+              'cabins.category': transitionedBooking.cabinCategory,
+            },
             {
               $inc: {
-                'cabins.$.heldSeats': -booking.seatsReserved,
-                'cabins.$.bookedSeats': booking.seatsReserved,
+                'cabins.$.heldSeats': -transitionedBooking.seatsReserved,
+                'cabins.$.bookedSeats': transitionedBooking.seatsReserved,
               },
             },
           );
-          if (booking.returnFlightId) {
-            await this.flightModel.updateOne(
-              { _id: booking.returnFlightId, 'cabins.category': booking.cabinCategory },
-              {
-                $inc: {
-                  'cabins.$.heldSeats': -booking.seatsReserved,
-                  'cabins.$.bookedSeats': booking.seatsReserved,
-                },
-              },
-            );
-          }
-
-          await this.notificationsService.createNotification({
-            userId: booking.userId,
-            title: `Flight Booking Confirmed (${booking.bookingReference})`,
-            message: `Your flight booking ${booking.bookingReference} is now Confirmed! You can download your e-ticket anytime.`,
-            type: 'booking_confirmed',
-            metadata: { bookingId: booking._id.toString(), bookingReference: booking.bookingReference },
-          });
-        } else {
-          // Convert room activeLocks from 'hold' to 'confirmed' (HTL-17)
-          await this.roomModel.updateMany(
-            {
-              _id: { $in: booking.roomIds },
-              'activeLocks.bookingReference': booking.bookingReference,
-            },
-            {
-              $set: {
-                'activeLocks.$.lockType': 'confirmed',
-                'activeLocks.$.expiresAt': null,
-              },
-            },
-          );
-
-          await this.notificationsService.createNotification({
-            userId: booking.userId,
-            title: `Hotel Reservation Confirmed (${booking.bookingReference})`,
-            message: `Your hotel reservation ${booking.bookingReference} is now Confirmed for ${booking.nights} night(s).`,
-            type: 'booking_confirmed',
-            metadata: { bookingId: booking._id.toString(), bookingReference: booking.bookingReference },
-          });
         }
+
+        await this.notificationsService.createNotification({
+          userId: transitionedBooking.userId,
+          title: `Flight Booking Confirmed (${transitionedBooking.bookingReference})`,
+          message: `Your flight booking ${transitionedBooking.bookingReference} is now Confirmed! You can download your e-ticket anytime.`,
+          type: 'booking_confirmed',
+          metadata: {
+            bookingId: transitionedBooking._id.toString(),
+            bookingReference: transitionedBooking.bookingReference,
+          },
+        });
+      } else {
+        await this.roomModel.updateMany(
+          {
+            _id: { $in: transitionedBooking.roomIds },
+            'activeLocks.bookingReference': transitionedBooking.bookingReference,
+          },
+          {
+            $set: {
+              'activeLocks.$.lockType': 'confirmed',
+              'activeLocks.$.expiresAt': null,
+            },
+          },
+        );
+
+        await this.notificationsService.createNotification({
+          userId: transitionedBooking.userId,
+          title: `Hotel Reservation Confirmed (${transitionedBooking.bookingReference})`,
+          message: `Your hotel reservation ${transitionedBooking.bookingReference} is now Confirmed for ${transitionedBooking.nights} night(s).`,
+          type: 'booking_confirmed',
+          metadata: {
+            bookingId: transitionedBooking._id.toString(),
+            bookingReference: transitionedBooking.bookingReference,
+          },
+        });
       }
 
       return {
         message: 'Webhook signature verified: payment succeeded and booking set to Confirmed (PAY-01, FLT-23, HTL-17).',
         payment,
-        bookingReference: booking.bookingReference,
-        bookingStatus: booking.status,
+        bookingReference: transitionedBooking.bookingReference,
+        bookingStatus: transitionedBooking.status,
       };
     }
 

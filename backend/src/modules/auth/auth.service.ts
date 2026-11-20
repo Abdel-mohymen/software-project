@@ -11,6 +11,7 @@ import { Model } from 'mongoose';
 import * as bcrypt from 'bcryptjs';
 import * as crypto from 'crypto';
 import { User, UserDocument } from '../users/schemas/user.schema';
+import { NotificationsService } from '../notifications/notifications.service';
 import {
   ChangePasswordDto,
   ForgotPasswordDto,
@@ -28,6 +29,7 @@ export class AuthService {
   constructor(
     @InjectModel(User.name) private readonly userModel: Model<UserDocument>,
     private readonly jwtService: JwtService,
+    private readonly notificationsService: NotificationsService,
   ) {}
 
   async register(dto: RegisterDto) {
@@ -52,8 +54,15 @@ export class AuthService {
       preferredCurrency: 'USD',
     });
 
+    this.notificationsService.recordDevMailboxEntry({
+      to: email,
+      subject: 'Verify your GIU Travel Platform email (ACC-02)',
+      body: `Verify your email via GET /api/auth/verify-email?token=${verificationToken}`,
+      token: verificationToken,
+    });
+
     return {
-      message: 'Registration successful.',
+      message: 'Registration successful. Check test mailbox for email verification link.',
       user: {
         id: user._id.toString(),
         name: user.name,
@@ -234,6 +243,13 @@ export class AuthService {
       user.passwordResetTokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
       user.passwordResetExpiresAt = new Date(Date.now() + 30 * 60 * 1000); // 30 minutes (ACC-07)
       await user.save();
+
+      this.notificationsService.recordDevMailboxEntry({
+        to: email,
+        subject: 'Password Reset Request (ACC-07)',
+        body: `Reset your password within 30 minutes using token: ${rawToken}`,
+        token: rawToken,
+      });
     }
 
     // Do not reveal whether the email exists (ACC-07)

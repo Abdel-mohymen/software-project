@@ -35,18 +35,18 @@ export class UsersController {
   @Delete('me')
   @ApiOperation({
     summary:
-      'Deactivate own account after confirmation; blocked if upcoming Confirmed bookings exist (ACC-12)',
+      'Deactivate own account after confirmation (requires confirm=true); blocked if upcoming Confirmed bookings exist (ACC-12, GEN-03)',
   })
-  @ApiQuery({ name: 'confirm', required: false, type: Boolean, example: true })
+  @ApiQuery({ name: 'confirm', required: true, type: Boolean, example: true })
   async deactivateMe(
     @CurrentUser('id') userId: string,
     @Query('confirm') confirm: string,
     @Res({ passthrough: true }) res: Response,
   ) {
-    const isConfirmed = confirm === 'true' || confirm === '1' || confirm === undefined;
+    const isConfirmed = confirm === 'true' || confirm === '1';
     const result = await this.usersService.deactivateOwnAccount(userId, isConfirmed);
-    res.clearCookie('access_token');
-    res.clearCookie('refresh_token');
+    res.clearCookie('access_token', { path: '/' });
+    res.clearCookie('refresh_token', { path: '/' });
     return result;
   }
 

@@ -14,6 +14,8 @@ import { Airline, AirlineSchema } from '../airlines/schemas/airline.schema';
 import { Hotel, HotelSchema } from '../hotels/schemas/hotel.schema';
 import { Flight, FlightSchema } from '../flights/schemas/flight.schema';
 import { Room, RoomSchema } from '../hotels/schemas/room.schema';
+import { FlightBookingsModule } from '../flight-bookings/flight-bookings.module';
+import { HotelBookingsModule } from '../hotel-bookings/hotel-bookings.module';
 import { PaymentsService } from './payments.service';
 import { PaymentsController } from './payments.controller';
 
@@ -29,6 +31,8 @@ import { PaymentsController } from './payments.controller';
       { name: Flight.name, schema: FlightSchema },
       { name: Room.name, schema: RoomSchema },
     ]),
+    FlightBookingsModule,
+    HotelBookingsModule,
   ],
   controllers: [PaymentsController],
   providers: [PaymentsService],

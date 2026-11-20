@@ -1,6 +1,6 @@
 ================================================
 Date: 2026-11-03
-Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Student: Mohamed Ahmed Abdelmohymen (GitHub: Abdel-mohymen)
 Tool: Gemini / ChatGPT
 Related Requirement: ACC-06, ACC-19
 Prompt:
@@ -12,7 +12,7 @@ Implemented JwtAuthGuard to verify user.lastActivityAt within 30 minutes, reissu
 
 ================================================
 Date: 2026-11-03
-Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Student: Mohamed Ahmed Abdelmohymen (GitHub: Abdel-mohymen)
 Tool: Gemini
 Related Requirement: GEN-08
 Prompt:
@@ -24,7 +24,7 @@ Added binary magic-bytes inspection in UploadsService.hasValidImageMagicBytes() 
 
 ================================================
 Date: 2026-11-04
-Student: Abdelmohymen (GitHub: Abdel-mohymen)
+Student: Mohamed Ahmed Abdelmohymen (GitHub: Abdel-mohymen)
 Tool: Gemini
 Related Requirement: GEN-12, FLT-02
 Prompt:
@@ -36,7 +36,7 @@ Created parseRfc4180Csv() in src/common/utils/csv.util.ts to seed Countries.csv,
 
 ================================================
 Date: 2026-11-04
-Student: Takiee (GitHub: Takiee-Allah)
+Student: Takiee-Allah (GitHub: Takiee)
 Tool: ChatGPT
 Related Requirement: ACC-13, ACC-07a
 Prompt:
@@ -48,7 +48,7 @@ Set mustChangePassword = true on UserSchema during POST /api/admin/moderators an
 
 ================================================
 Date: 2026-11-05
-Student: Takiee (GitHub: Takiee-Allah)
+Student: Takiee-Allah (GitHub: Takiee)
 Tool: ChatGPT
 Related Requirement: ACC-15, ACC-16, GEN-01
 Prompt:
@@ -60,7 +60,7 @@ Implemented separate status fields on User (active/suspended/deactivated) vs Air
 
 ================================================
 Date: 2026-11-05
-Student: Takiee (GitHub: Takiee-Allah)
+Student: Takiee-Allah (GitHub: Takiee)
 Tool: ChatGPT
 Related Requirement: GEN-07, GEN-09, GEN-10
 Prompt:
@@ -72,7 +72,7 @@ Added a unique compound index { reporterId: 1, targetType: 1, targetId: 1 } on R
 
 ================================================
 Date: 2026-11-05
-Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Student: Abdulrahman Walid (GitHub: abdullrahmanwalidshawky)
 Tool: ChatGPT
 Related Requirement: FLT-03, GEN-06
 Prompt:
@@ -84,7 +84,7 @@ Implemented parseLocalAirportTimeToUtc() and formatUtcToLocalAirportTime() in ti
 
 ================================================
 Date: 2026-11-06
-Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Student: Abdulrahman Walid (GitHub: abdullrahmanwalidshawky)
 Tool: ChatGPT
 Related Requirement: FLT-04, FLT-05, FLT-06
 Prompt:
@@ -96,7 +96,7 @@ Validated dto.seatCount >= (cabin.bookedSeats + cabin.heldSeats) in FlightsServi
 
 ================================================
 Date: 2026-11-06
-Student: Abdo (GitHub: abdullrahmanwalidshawky)
+Student: Abdulrahman Walid (GitHub: abdullrahmanwalidshawky)
 Tool: ChatGPT
 Related Requirement: FLT-09, FLT-11, FLT-12, FLT-15
 Prompt:
@@ -108,7 +108,7 @@ Sorted cancellationTiers descending by daysBeforeDeparture to pick the highest t
 
 ================================================
 Date: 2026-11-06
-Student: Abdella (GitHub: Abdallah)
+Student: Abdallah Ahmed (GitHub: abdallaahmadd)
 Tool: ChatGPT
 Related Requirement: FLT-22
 Prompt:
@@ -120,7 +120,7 @@ Replaced $expr inside $elemMatch with an optimistic concurrency loop in atomical
 
 ================================================
 Date: 2026-11-07
-Student: Abdella (GitHub: Abdallah)
+Student: Abdallah Ahmed (GitHub: abdallaahmadd)
 Tool: ChatGPT
 Related Requirement: FLT-22, GEN-11
 Prompt:
@@ -132,7 +132,7 @@ Used an atomic while-loop with findOneAndUpdate({ status: 'Pending Payment', hol
 
 ================================================
 Date: 2026-11-07
-Student: Abdella (GitHub: Abdallah)
+Student: Abdallah Ahmed (GitHub: abdallaahmadd)
 Tool: ChatGPT
 Related Requirement: FLT-23, FLT-29
 Prompt:
@@ -144,7 +144,7 @@ Implemented generateETicketPdf() streaming a PDF buffer with PNR, flight segment
 
 ================================================
 Date: 2026-11-07
-Student: Adham (GitHub: Adham)
+Student: Adam Mohamed (GitHub: adammohamed16001342)
 Tool: ChatGPT
 Related Requirement: HTL-03, HTL-04, HTL-05, HTL-06
 Prompt:
@@ -156,7 +156,7 @@ Implemented validateAndParseDateRanges() in HotelsService to sort and check rang
 
 ================================================
 Date: 2026-11-08
-Student: Adham (GitHub: Adham)
+Student: Adam Mohamed (GitHub: adammohamed16001342)
 Tool: ChatGPT
 Related Requirement: HTL-16, HTL-18
 Prompt:
@@ -168,7 +168,7 @@ Added activeLocks on RoomSchema and implemented atomicallyLockRoomForDates() usi
 
 ================================================
 Date: 2026-11-08
-Student: Adham (GitHub: Adham)
+Student: Adam Mohamed (GitHub: adammohamed16001342)
 Tool: ChatGPT
 Related Requirement: HTL-23, HTL-24, HTL-26
 Prompt:
@@ -180,7 +180,7 @@ Added a unique index on hotelBookingId in ReviewSchema, verified reservation.sta
 
 ================================================
 Date: 2026-11-08
-Student: Youssef (GitHub: omarashraf4488 / Youssef)
+Student: Hamza Feras (GitHub: hamzaferas4)
 Tool: ChatGPT
 Related Requirement: PAY-01, PAY-02
 Prompt:
@@ -192,7 +192,7 @@ Blocked createPaymentIntent() unless booking.policyAccepted && booking.policyAcc
 
 ================================================
 Date: 2026-11-09
-Student: Youssef (GitHub: omarashraf4488 / Youssef)
+Student: Hamza Feras (GitHub: hamzaferas4)
 Tool: ChatGPT
 Related Requirement: PAY-01, FLT-23, HTL-17
 Prompt:
@@ -204,7 +204,7 @@ Updated Payment status to 'succeeded', Booking status to 'Confirmed', converted 
 
 ================================================
 Date: 2026-11-09
-Student: Youssef (GitHub: omarashraf4488 / Youssef)
+Student: Hamza Feras (GitHub: hamzaferas4)
 Tool: ChatGPT
 Related Requirement: PAY-03
 Prompt:
@@ -216,7 +216,7 @@ Integrated stripe.refunds.create() with the booking's succeeded PaymentIntent an
 
 ================================================
 Date: 2026-11-09
-Student: Hamza (GitHub: hamzaferas4)
+Student: Omar Ashraf (GitHub: omarashraf4488)
 Tool: ChatGPT
 Related Requirement: ITN-05, ITN-07, ITN-08, ITN-09
 Prompt:
@@ -228,7 +228,7 @@ Implemented recalculateDayNumbersAndDates() deriving each day's date from startD
 
 ================================================
 Date: 2026-11-10
-Student: Hamza (GitHub: hamzaferas4)
+Student: Omar Ashraf (GitHub: omarashraf4488)
 Tool: ChatGPT
 Related Requirement: ITN-14, ITN-16, ITN-18
 Prompt:
@@ -240,7 +240,7 @@ Implemented getOrFetchExchangeRates() passing FXRATES_API_KEY, caching daily USD
 
 ================================================
 Date: 2026-11-10
-Student: Hamza (GitHub: hamzaferas4)
+Student: Omar Ashraf (GitHub: omarashraf4488)
 Tool: ChatGPT
 Related Requirement: ITN-21, BLG-06, BLG-09
 Prompt:

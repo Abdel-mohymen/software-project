@@ -21,6 +21,7 @@ import {
 import { AccountStatus, UserRole } from '../../common/enums/role.enum';
 import { paginateResult } from '../../common/dto/pagination.dto';
 import { NotificationsService } from '../notifications/notifications.service';
+import { buildSafeRegex } from '../../common/utils/regex.util';
 
 @Injectable()
 export class AdminService {
@@ -132,8 +133,8 @@ export class AdminService {
     if (query.status) {
       filter.status = query.status;
     }
-    if (query.search) {
-      const regex = new RegExp(query.search.trim(), 'i');
+    if (query.search && query.search.trim()) {
+      const regex = buildSafeRegex(query.search);
       filter.$or = [{ name: regex }, { email: regex }];
     }
 
@@ -220,7 +221,6 @@ export class AdminService {
       .collection(collectionName)
       .updateOne({ _id: providerObjId }, { $set: { isActive: activate } });
 
-    // Notify assigned moderator(s) (ACC-15, GEN-01)
     const moderators = await this.userModel.find({
       assignedProviderType: type,
       assignedProviderId: providerObjId,
