@@ -9,7 +9,7 @@ import {
   Query,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Public } from '../../common/decorators/public.decorator';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -59,10 +59,16 @@ export class HotelBookingsController {
   @Post('hotel-bookings/:id/cancel')
   @ApiOperation({
     summary:
-      'Cancel own Confirmed reservation as a whole before check-in date and compute tier refund (HTL-21)',
+      'Cancel own Confirmed reservation as a whole before check-in date (requires confirm=true) and compute tier refund (HTL-21, GEN-03)',
   })
-  async cancelHotelBooking(@CurrentUser('id') userId: string, @Param('id') id: string) {
-    return this.hotelBookingsService.cancelHotelBookingByUser(userId, id, true);
+  @ApiQuery({ name: 'confirm', required: true, type: Boolean, example: true })
+  async cancelHotelBooking(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Query('confirm') confirm: string,
+  ) {
+    const isConfirmed = confirm === 'true' || confirm === '1';
+    return this.hotelBookingsService.cancelHotelBookingByUser(userId, id, isConfirmed);
   }
 
   @Get('hotels/:id/reservations')

@@ -6,10 +6,11 @@ import {
   Param,
   Patch,
   Post,
+  Query,
   Res,
   UseGuards,
 } from '@nestjs/common';
-import { ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiOperation, ApiQuery, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 import { Roles } from '../../common/decorators/roles.decorator';
 import { RolesGuard } from '../../common/guards/roles.guard';
@@ -69,10 +70,16 @@ export class FlightBookingsController {
   @Post('flight-bookings/:id/cancel')
   @ApiOperation({
     summary:
-      'Cancel own Confirmed flight booking before departure and compute tier refund (FLT-26)',
+      'Cancel own Confirmed flight booking before departure (requires confirm=true) and compute tier refund (FLT-26, GEN-03)',
   })
-  async cancelBooking(@CurrentUser('id') userId: string, @Param('id') id: string) {
-    return this.flightBookingsService.cancelFlightBookingByUser(userId, id, true);
+  @ApiQuery({ name: 'confirm', required: true, type: Boolean, example: true })
+  async cancelBooking(
+    @CurrentUser('id') userId: string,
+    @Param('id') id: string,
+    @Query('confirm') confirm: string,
+  ) {
+    const isConfirmed = confirm === 'true' || confirm === '1';
+    return this.flightBookingsService.cancelFlightBookingByUser(userId, id, isConfirmed);
   }
 
   @Patch('flight-bookings/:id/change-flight')

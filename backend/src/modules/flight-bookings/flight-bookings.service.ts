@@ -222,12 +222,28 @@ export class FlightBookingsService {
     cabinCategory: string,
     seatsCount: number,
   ) {
-    const flight = await this.flightModel.findById(flightId);
-    if (!flight) return;
-    const cabin = flight.cabins.find((c) => c.category === cabinCategory);
-    if (!cabin) return;
-    cabin.heldSeats = Math.max(0, (cabin.heldSeats || 0) - seatsCount);
-    await flight.save();
+    // Atomic decrement when heldSeats >= seatsCount; otherwise atomic clamp to 0 (no findById+save lost updates!)
+    const res = await this.flightModel.updateOne(
+      {
+        _id: flightId,
+        cabins: {
+          $elemMatch: {
+            category: cabinCategory,
+            heldSeats: { $gte: seatsCount },
+          },
+        },
+      },
+      {
+        $inc: { 'cabins.$.heldSeats': -seatsCount },
+      },
+    );
+
+    if (res.modifiedCount === 0) {
+      await this.flightModel.updateOne(
+        { _id: flightId, 'cabins.category': cabinCategory },
+        { $set: { 'cabins.$.heldSeats': 0 } },
+      );
+    }
   }
 
   async createHoldBooking(userId: string, dto: CreateFlightBookingDto) {

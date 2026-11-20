@@ -7,8 +7,11 @@ import {
 } from '@nestjs/common';
 import { InjectConnection, InjectModel } from '@nestjs/mongoose';
 import { Connection, Model, Types } from 'mongoose';
+import Stripe from 'stripe';
 import { Flight, FlightDocument } from './schemas/flight.schema';
 import { Airline, AirlineDocument } from '../airlines/schemas/airline.schema';
+import { Refund, RefundDocument } from '../payments/schemas/refund.schema';
+import { Payment, PaymentDocument } from '../payments/schemas/payment.schema';
 import { ReferenceService } from '../reference/reference.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import {
@@ -26,16 +29,29 @@ import { BookingLifecycleStatus, UserRole } from '../../common/enums/role.enum';
 
 @Injectable()
 export class FlightsService {
+  private stripe: Stripe | null = null;
+
   constructor(
     @InjectModel(Flight.name) private readonly flightModel: Model<FlightDocument>,
     @InjectModel(Airline.name) private readonly airlineModel: Model<AirlineDocument>,
+    @InjectModel(Refund.name) private readonly refundModel: Model<RefundDocument>,
+    @InjectModel(Payment.name) private readonly paymentModel: Model<PaymentDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly referenceService: ReferenceService,
     private readonly notificationsService: NotificationsService,
-  ) {}
+  ) {
+    const key = process.env.STRIPE_SECRET_KEY;
+    if (key && key.startsWith('sk_test_') && !key.includes('replace_with')) {
+      this.stripe = new Stripe(key, { apiVersion: '2023-10-16' as any });
+    }
+  }
 
   private ensureAirlineModerator(user: any, airlineId?: string) {
-    if (user.role !== UserRole.AIRLINE_MODERATOR || user.assignedProviderType !== 'airline' || !user.assignedProviderId) {
+    if (
+      user.role !== UserRole.AIRLINE_MODERATOR ||
+      user.assignedProviderType !== 'airline' ||
+      !user.assignedProviderId
+    ) {
       throw new ForbiddenException('Only an assigned Airline Moderator can perform this action.');
     }
     if (airlineId && user.assignedProviderId.toString() !== airlineId.toString()) {
@@ -66,27 +82,47 @@ export class FlightsService {
     ]);
 
     if (!depAirport) {
-      throw new BadRequestException(`Departure airport '${depCode}' is not in the predefined airport list (FLT-02).`);
+      throw new BadRequestException(
+        `Departure airport '${depCode}' is not in the predefined airport list (FLT-02).`,
+      );
     }
     if (!arrAirport) {
-      throw new BadRequestException(`Arrival airport '${arrCode}' is not in the predefined airport list (FLT-02).`);
+      throw new BadRequestException(
+        `Arrival airport '${arrCode}' is not in the predefined airport list (FLT-02).`,
+      );
     }
 
-    const departureTimeUtc = parseLocalAirportTimeToUtc(dto.departureTimeLocal, depAirport.time_zone);
-    const arrivalTimeUtc = parseLocalAirportTimeToUtc(dto.arrivalTimeLocal, arrAirport.time_zone);
+    const departureTimeUtc = parseLocalAirportTimeToUtc(
+      dto.departureTimeLocal,
+      depAirport.time_zone,
+    );
+    const arrivalTimeUtc = parseLocalAirportTimeToUtc(
+      dto.arrivalTimeLocal,
+      arrAirport.time_zone,
+    );
 
     if (departureTimeUtc.getTime() <= Date.now()) {
       throw new BadRequestException('Departure date-time cannot be in the past (FLT-03).');
     }
 
     if (arrivalTimeUtc.getTime() <= departureTimeUtc.getTime()) {
-      throw new BadRequestException('Arrival time must be after departure time when compared in UTC (FLT-03).');
+      throw new BadRequestException(
+        'Arrival time must be after departure time when compared in UTC (FLT-03).',
+      );
     }
 
-    const departureTimeLocal = formatUtcToLocalAirportTime(departureTimeUtc, depAirport.time_zone);
-    const arrivalTimeLocal = formatUtcToLocalAirportTime(arrivalTimeUtc, arrAirport.time_zone);
+    const departureTimeLocal = formatUtcToLocalAirportTime(
+      departureTimeUtc,
+      depAirport.time_zone,
+    );
+    const arrivalTimeLocal = formatUtcToLocalAirportTime(
+      arrivalTimeUtc,
+      arrAirport.time_zone,
+    );
     const departureDateLocal = departureTimeLocal.slice(0, 10);
-    const durationMinutes = Math.round((arrivalTimeUtc.getTime() - departureTimeUtc.getTime()) / 60000);
+    const durationMinutes = Math.round(
+      (arrivalTimeUtc.getTime() - departureTimeUtc.getTime()) / 60000,
+    );
     const flightNumber = dto.flightNumber.trim().toUpperCase();
 
     const duplicate = await this.flightModel.findOne({
@@ -133,7 +169,9 @@ export class FlightsService {
 
     const duplicateCategory = flight.cabins.some((c) => c.category === dto.category);
     if (duplicateCategory) {
-      throw new ConflictException(`Cabin category '${dto.category}' already exists on this flight (FLT-04).`);
+      throw new ConflictException(
+        `Cabin category '${dto.category}' already exists on this flight (FLT-04).`,
+      );
     }
 
     flight.cabins.push({
@@ -210,7 +248,9 @@ export class FlightsService {
       (dto.arrivalAirport && dto.arrivalAirport.toUpperCase() !== flight.arrivalAirport)
     ) {
       if (existingBookingsCount > 0) {
-        throw new BadRequestException('Airports cannot be changed once the flight has any booking (FLT-05).');
+        throw new BadRequestException(
+          'Airports cannot be changed once the flight has any booking (FLT-05).',
+        );
       }
       const depCode = (dto.departureAirport || flight.departureAirport).toUpperCase();
       const arrCode = (dto.arrivalAirport || flight.arrivalAirport).toUpperCase();
@@ -253,15 +293,22 @@ export class FlightsService {
 
       flight.departureTimeUtc = newDepUtc;
       flight.arrivalTimeUtc = newArrUtc;
-      flight.departureTimeLocal = formatUtcToLocalAirportTime(newDepUtc, flight.departureTimeZone);
-      flight.arrivalTimeLocal = formatUtcToLocalAirportTime(newArrUtc, flight.arrivalTimeZone);
+      flight.departureTimeLocal = formatUtcToLocalAirportTime(
+        newDepUtc,
+        flight.departureTimeZone,
+      );
+      flight.arrivalTimeLocal = formatUtcToLocalAirportTime(
+        newArrUtc,
+        flight.arrivalTimeZone,
+      );
       flight.departureDateLocal = flight.departureTimeLocal.slice(0, 10);
-      flight.durationMinutes = Math.round((newArrUtc.getTime() - newDepUtc.getTime()) / 60000);
+      flight.durationMinutes = Math.round(
+        (newArrUtc.getTime() - newDepUtc.getTime()) / 60000,
+      );
     }
 
     await flight.save();
 
-    // FLT-05: Any time change sends an in-app notification to passengers with Confirmed bookings
     if (timeChanged) {
       const confirmedBookings = await flightBookingsColl
         .find({
@@ -307,9 +354,7 @@ export class FlightsService {
     });
     await flight.save();
 
-    // Cancel all Confirmed bookings with 100% refund & release pending holds (FLT-06, PAY-03)
     const flightBookingsColl = this.connection.collection('flightbookings');
-    const refundsColl = this.connection.collection('refunds');
 
     const affectedBookings = await flightBookingsColl
       .find({
@@ -333,7 +378,34 @@ export class FlightsService {
           },
         );
 
-        await refundsColl.insertOne({
+        let stripeRefundId = `re_provider_${Date.now()}`;
+        let refundStatus: 'Pending' | 'Refunded' | 'Failed' = 'Refunded';
+
+        const payment = await this.paymentModel.findOne({
+          bookingType: 'flight',
+          bookingId: booking._id,
+          status: 'succeeded',
+        });
+
+        if (
+          this.stripe &&
+          payment &&
+          payment.stripePaymentIntentId &&
+          !payment.stripePaymentIntentId.startsWith('pi_test_')
+        ) {
+          try {
+            const stripeRefund = await this.stripe.refunds.create({
+              payment_intent: payment.stripePaymentIntentId,
+              amount: Math.round(booking.totalAmount * 100),
+            });
+            stripeRefundId = stripeRefund.id;
+            refundStatus = stripeRefund.status === 'succeeded' ? 'Refunded' : 'Pending';
+          } catch {
+            refundStatus = 'Failed';
+          }
+        }
+
+        await this.refundModel.create({
           bookingType: 'flight',
           bookingId: booking._id,
           userId: booking.userId,
@@ -341,10 +413,8 @@ export class FlightsService {
           currency: booking.currency || 'USD',
           refundPercentage: 100,
           reason: 'Provider-initiated flight cancellation (100% refund)',
-          status: 'Refunded',
-          stripeRefundId: `re_provider_${Date.now()}`,
-          createdAt: new Date(),
-          updatedAt: new Date(),
+          status: refundStatus,
+          stripeRefundId,
         });
 
         await this.notificationsService.createNotification({
@@ -364,7 +434,7 @@ export class FlightsService {
 
     return {
       message:
-        'Flight cancelled. All Confirmed bookings have been cancelled with a 100% refund and pending holds released (FLT-06).',
+        'Flight cancelled. All Confirmed bookings have been cancelled with a 100% refund via Stripe/RefundModel and pending holds released (FLT-06).',
       flight,
     };
   }
@@ -425,7 +495,7 @@ export class FlightsService {
       throw new BadRequestException('Minimum price cannot be greater than maximum price (FLT-15).');
     }
 
-    const seatsRequired = adults + children; // Infants occupy no seat (FLT-12)
+    const seatsRequired = adults + children;
 
     const activeAirlines = await this.airlineModel.find({ isActive: true }).lean();
     const activeAirlineMap = new Map(activeAirlines.map((a) => [a._id.toString(), a]));
